@@ -27,7 +27,7 @@ Harbor deploys three types of servers:
 - Prometheus (Metrics aggregation)
 - Grafana (Metrics visualization with pre-configured dashboards)
 - Autoscaler (Automatic horizontal scaling based on CPU/memory metrics)
-- k6 (Optional load testing targeting data planes)
+- k6 (Continuous load testing - automatically targets all data planes)
 - cAdvisor (Container metrics)
 - node-exporter (System metrics)
 
@@ -222,6 +222,17 @@ autoscaler:
   mem_threshold_down: 40.0 # Scale down when Memory < 40%
   min_replicas: 1 # Minimum servers per pool
   max_replicas: 10 # Maximum servers per pool
+
+k6:
+  enabled: false # Set to true to enable continuous load testing
+  preallocated_vus: 10
+  max_vus: 100
+  rate: 10 # Requests per second
+  duration: "30s"
+  target_path: "/"
+  connection_timeout: "10s"
+  request_timeout: "30s"
+  graceful_stop: "30s"
 ```
 
 See `configs/harbor.example.yaml` for a complete configuration with all options and comments.
@@ -537,6 +548,163 @@ Example output:
 [autoscaler] [info] [app] Metrics - Replicas: 2 | CPU: 78.45% (threshold: 30%/70%) | Memory: 55.20% (threshold: 40%/80%)
 [autoscaler] [info] [app] Scaling UP (CPU: 78.45%, Memory: 55.20%)
 [autoscaler] [info] [app] Creating server: harbor-app-3
+```
+
+## Load Testing with k6
+
+Harbor includes integrated Grafana k6 for continuous load testing of your data plane servers. When enabled, k6 runs on the control plane and automatically targets all data planes.
+
+### How It Works
+
+1. **Automatic Target Discovery**: k6 automatically targets all data plane private IPs
+2. **Continuous Testing**: Runs continuously at configured request rates
+3. **Dynamic Updates**: When data planes scale up/down, k6 automatically updates its targets
+4. **Performance Thresholds**: Built-in thresholds for response times and error rates
+5. **Metrics Integration**: Results feed into Prometheus for monitoring
+
+### Configuration
+
+Enable k6 in your `harbor.yaml`:
+
+```yaml
+k6:
+  enabled: true # Enable continuous load testing
+  preallocated_vus: 10 # Pre-allocated virtual users
+  max_vus: 500 # Maximum virtual users (scales based on rate)
+  rate: 50 # Target requests per second
+  duration: "30m" # Test duration ("30s", "5m", "1h", or "0" for infinite)
+  target_path: "/" # Path to test (e.g., "/api/health")
+  connection_timeout: "10s" # Connection timeout
+  request_timeout: "30s" # Request timeout per request
+  graceful_stop: "30s" # Graceful shutdown duration
+```
+
+### Performance Testing Scenarios
+
+**Light Testing** (Development/Staging):
+```yaml
+k6:
+  enabled: true
+  rate: 10 # 10 req/s
+  preallocated_vus: 5
+  max_vus: 50
+  duration: "10m"
+```
+
+**Moderate Testing** (Pre-production):
+```yaml
+k6:
+  enabled: true
+  rate: 50 # 50 req/s
+  preallocated_vus: 10
+  max_vus: 200
+  duration: "30m"
+```
+
+**Heavy Testing** (Load/Stress testing):
+```yaml
+k6:
+  enabled: true
+  rate: 500 # 500 req/s
+  preallocated_vus: 50
+  max_vus: 1000
+  duration: "1h"
+```
+
+### Performance Thresholds
+
+The k6 script includes built-in thresholds:
+- **p95 Latency**: 95% of requests must complete under 500ms
+- **Error Rate**: Less than 10% error rate
+
+### Monitoring k6
+
+Check k6 test progress and results:
+
+```bash
+# Get control plane IP
+harbor status
+
+# View k6 logs (live test output)
+ssh root@<control-plane-ip> "docker logs k6 --tail 100 -f"
+
+# Check if k6 is running
+ssh root@<control-plane-ip> "docker ps | grep k6"
+```
+
+Example k6 output:
+```
+Starting load test
+Targets: http://10.0.1.3, http://10.0.1.4, http://10.0.1.5
+Path: /
+Rate: 50 req/s
+Duration: 30m
+Preallocated VUs: 10
+Max VUs: 500
+
+running (01m30s), 000/010 VUs, 4500 complete and 0 interrupted iterations
+constant_rate ✓ [======================================] 010/500 VUs  01m30s  50 iters/s
+
+     ✓ status is 200
+     ✓ response time < 500ms
+
+     checks.........................: 100.00% ✓ 9000      ✗ 0
+     data_received..................: 2.1 MB  23 kB/s
+     data_sent......................: 360 kB  4.0 kB/s
+     http_req_duration..............: avg=45ms   min=12ms med=42ms max=180ms p(95)=85ms  p(99)=120ms
+     http_reqs......................: 4500    50/s
+     iteration_duration.............: avg=46ms   min=13ms med=43ms max=182ms p(95)=86ms  p(99)=121ms
+```
+
+### Integration with Autoscaling
+
+When used with autoscaling, k6 provides realistic load that can trigger scale events:
+
+```yaml
+autoscaler:
+  enabled: true
+  cpu_threshold_up: 70.0
+  cpu_threshold_down: 30.0
+
+k6:
+  enabled: true
+  rate: 100 # Generate load to test autoscaling
+  duration: "1h"
+```
+
+This creates a feedback loop where:
+1. k6 generates consistent load
+2. Autoscaler monitors metrics from Prometheus
+3. Servers scale up/down based on load
+4. k6 automatically updates to target new data planes
+
+### Updating k6 Targets
+
+When you manually scale data planes, k6 targets are automatically updated:
+
+```bash
+# Scale up - k6 automatically targets new data planes
+harbor scale lb 5
+
+# Scale down - k6 stops targeting removed data planes
+harbor scale lb 2
+
+# Redeploy services - k6 refreshes all targets
+harbor redeploy
+```
+
+### Disabling k6
+
+To disable k6 load testing:
+
+```yaml
+k6:
+  enabled: false
+```
+
+Then redeploy:
+```bash
+harbor redeploy
 ```
 
 ## Advanced Usage

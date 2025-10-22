@@ -14,7 +14,7 @@ Harbor is now fully functional and deploys a complete APISIX-based infrastructur
    - Prometheus (Metrics aggregation)
    - Grafana (Metrics visualization)
    - Autoscaler (Automatic server scaling based on metrics)
-   - k6 (Optional load testing targeting data plane servers)
+   - k6 (Continuous load testing - automatically targets all data planes with dynamic updates)
    - cAdvisor (Container metrics)
    - node-exporter (System metrics)
 
@@ -233,15 +233,17 @@ autoscaler:
 
 k6:
   enabled: false # Set to true to enable continuous load testing
-  preallocated_vus: 10
-  max_vus: 100
-  rate: 10 # Requests per second
-  duration: "30s"
-  target_path: "/"
-  connection_timeout: "10s"
-  request_timeout: "30s"
-  graceful_stop: "30s"
+  preallocated_vus: 10 # Pre-allocated virtual users
+  max_vus: 100 # Maximum virtual users (auto-scales based on rate)
+  rate: 10 # Target requests per second
+  duration: "30s" # Test duration ("30s", "5m", "1h", or "0" for infinite)
+  target_path: "/" # Path to test (e.g., "/api/health")
+  connection_timeout: "10s" # Connection timeout
+  request_timeout: "30s" # Request timeout per request
+  graceful_stop: "30s" # Graceful shutdown duration
 ```
+
+**Note**: k6 automatically targets all data plane private IPs. When data planes scale up/down (via autoscaler or manual scaling), k6 targets are automatically updated.
 
 ## Usage
 
@@ -389,6 +391,117 @@ Harbor stores all state in `~/.harbor/state.db` (SQLite):
 4. **Protect State DB**: Keep `~/.harbor/state.db` secure
 5. **Enable HTTPS**: Configure SSL certificates for production
 6. **Private Network**: All inter-server communication uses private IPs
+
+## Load Testing with k6
+
+Harbor includes integrated Grafana k6 for continuous load testing. k6 runs on the control plane and automatically targets all data plane servers.
+
+### Key Features
+
+- **Automatic Target Discovery**: k6 targets all data plane private IPs automatically
+- **Dynamic Updates**: When scaling (manual or auto), k6 targets update automatically
+- **Performance Thresholds**: Built-in thresholds for latency (p95 < 500ms) and error rate (< 10%)
+- **Flexible Configuration**: Configurable request rates, VUs, duration, and target paths
+
+### Configuration Examples
+
+**Development Testing** (Light load):
+```yaml
+k6:
+  enabled: true
+  rate: 10 # 10 requests/second
+  preallocated_vus: 5
+  max_vus: 50
+  duration: "10m"
+  target_path: "/"
+```
+
+**Production Testing** (Moderate load):
+```yaml
+k6:
+  enabled: true
+  rate: 100 # 100 requests/second
+  preallocated_vus: 20
+  max_vus: 500
+  duration: "1h"
+  target_path: "/api/health"
+```
+
+**Stress Testing** (Heavy load):
+```yaml
+k6:
+  enabled: true
+  rate: 500 # 500 requests/second
+  preallocated_vus: 50
+  max_vus: 1000
+  duration: "30m"
+  target_path: "/"
+```
+
+### Monitoring k6
+
+View k6 logs to see test progress and results:
+
+```bash
+# Get control plane IP
+harbor status
+
+# View live k6 output
+ssh root@<control-plane-ip> "docker logs k6 --tail 100 -f"
+
+# Check k6 container status
+ssh root@<control-plane-ip> "docker ps | grep k6"
+```
+
+Example output:
+```
+Starting load test
+Targets: http://10.0.1.3, http://10.0.1.4
+Path: /
+Rate: 50 req/s
+Duration: 30m
+
+running (05m00s), 000/010 VUs, 15000 complete and 0 interrupted iterations
+     ✓ status is 200
+     ✓ response time < 500ms
+
+     checks.........................: 100.00% ✓ 30000     ✗ 0
+     http_req_duration..............: avg=45ms   p(95)=85ms  p(99)=120ms
+     http_reqs......................: 15000   50/s
+```
+
+### Integration with Autoscaling
+
+When combined with autoscaling, k6 creates a realistic load testing environment:
+
+```yaml
+autoscaler:
+  enabled: true
+  cpu_threshold_up: 70.0
+
+k6:
+  enabled: true
+  rate: 100 # Generate steady load
+  duration: "1h"
+```
+
+This creates a feedback loop:
+1. k6 generates consistent load on data planes
+2. Autoscaler monitors CPU/memory via Prometheus
+3. New data planes are created when thresholds are exceeded
+4. k6 automatically includes new data planes in its target list
+5. Load is distributed across all data planes
+
+### Automatic Target Updates
+
+k6 targets are automatically updated when:
+
+1. **Initial Deployment**: `harbor deploy` configures k6 with all data plane IPs
+2. **Manual Scaling**: `harbor scale lb 5` recreates k6 container with updated targets
+3. **Autoscaling**: Autoscaler updates k6 when creating/destroying data planes
+4. **Redeployment**: `harbor redeploy` refreshes k6 with current infrastructure state
+
+No manual intervention required!
 
 ## Cost Estimate (Hetzner)
 
