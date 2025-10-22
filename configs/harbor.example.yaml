@@ -1,0 +1,169 @@
+# Harbor Configuration Example
+# Copy this file to harbor.yaml and customize for your deployment
+
+# Cloud provider: "hetzner" or "digitalocean"
+provider: hetzner
+
+# Control plane server configuration
+# This server runs APISIX Control Plane, etcd, Prometheus, cAdvisor, and node-exporter
+server:
+  name: "harbor-control"
+  type: "ccx33"
+  location: "ash"
+  image: "ubuntu-24.04"
+
+# Private network configuration
+network:
+  name: "harbor-network"
+  ip_range: "10.0.0.0/16"
+  subnet_range: "10.0.1.0/24"
+
+# Firewall configuration
+firewall:
+  name: "harbor-firewall"
+  rules:
+    # SSH access (replace 'current' with your IP or use specific IPs)
+    - direction: "in"
+      port: "22"
+      protocol: "tcp"
+      source_ips: ["current"] # 'current' will be replaced with your current IP
+      description: "SSH access"
+    # HTTPS traffic
+    - direction: "in"
+      port: "443"
+      protocol: "tcp"
+      source_ips: ["0.0.0.0/0", "::/0"]
+      description: "HTTPS from anywhere"
+
+# Container configuration (for app pool)
+container:
+  name: "nginx-web"
+  image: "nginx:latest"
+
+# Load Balancer (APISIX Data Planes)
+# These servers run APISIX Data Plane, cAdvisor, and node-exporter
+loadbalancer:
+  enabled: true
+  replicas: 2 # Number of data plane servers
+  server_type: "ccx13" # Smaller instances for load balancers
+  location: "ash"
+  image: "ubuntu-24.04"
+
+# Application
+# These servers run your application containers, cAdvisor, and node-exporter
+app:
+  enabled: true
+  replicas: 2
+  server_type: "ccx13"
+  location: "ash"
+  image: "ubuntu-24.04"
+
+# APISIX Configuration
+apisix:
+  admin_port: 9180
+  api_key: "edd1c9f034335f136f87ad84b625c8f1" # Change this in production!
+
+  # Upstream configurations
+  # Nodes are automatically populated with app pool server IPs
+  upstreams:
+    - id: "web"
+      name: "web"
+      nodes: {} # Dynamically populated during deployment
+      enable_health_check: true
+      health_check_path: "/"
+      healthy_interval: 2
+      unhealthy_interval: 1
+      keepalive_size: 320
+      keepalive_idle_timeout: 60
+      keepalive_requests: 10000
+
+    - id: "grafana"
+      name: "grafana"
+      nodes: {} # Dynamically populated with control plane IP during deployment
+      enable_health_check: true
+      health_check_path: "/api/health"
+      healthy_interval: 5
+      unhealthy_interval: 2
+
+  # Global rules - apply to all routes
+  global_rules:
+    - id: "global-rules"
+      plugins:
+        prometheus: {}
+
+  # Route configurations
+  routes:
+    # Grafana route
+    - id: "grafana"
+      name: "grafana-route"
+      methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"]
+      host: "grafana.snoculars.com"
+      uri: "/*"
+      upstream_id: "grafana"
+
+    # Custom hello route (uses custom plugin)
+    - id: "hello"
+      name: "hello-route"
+      methods: ["GET"]
+      uri: "/hello"
+      upstream_id: "web"
+      plugins:
+        hello: {}
+
+    # Main web route with caching
+    - id: "web"
+      name: "web-route"
+      methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+      uri: "/*"
+      upstream_id: "web"
+      plugins:
+        proxy-cache:
+          cache_key: ["$uri", "-cache-id"]
+          cache_method: ["GET"]
+          cache_http_status: [200]
+          no_cache: ["$arg_nocache"]
+          hide_cache_headers: false
+
+  # SSL certificate configuration (optional)
+  ssl:
+    id: "1"
+    cert_path: "./certs/snoculars.com.crt"
+    key_path: "./certs/snoculars.com.key"
+    client_ca_path: "./certs/cloudflare_origin_pull_ca.pem"
+    client_ca_depth: 1
+    snis:
+      - "snoculars.com"
+      - "*.snoculars.com"
+    ssl_protocols:
+      - "TLSv1.2"
+      - "TLSv1.3"
+
+# Monitoring Configuration
+monitoring:
+  prometheus_port: 9090
+  cadvisor_port: 8080
+  node_exporter_port: 9100
+
+# Autoscaler Configuration
+autoscaler:
+  enabled: true
+  check_interval: 30 # Check metrics every 30 seconds
+  cooldown: 300 # Wait 5 minutes after scaling before scaling again
+  cpu_threshold_up: 70.0 # Scale up if CPU > 70%
+  cpu_threshold_down: 30.0 # Scale down if CPU < 30%
+  mem_threshold_up: 80.0 # Scale up if memory > 80%
+  mem_threshold_down: 40.0 # Scale down if memory < 40%
+  min_replicas: 1 # Minimum servers per pool
+  max_replicas: 10 # Maximum servers per pool
+
+# k6 Load Testing Configuration
+k6:
+  enabled: true # Set to true to enable k6 load testing
+  preallocated_vus: 10 # Number of virtual users to preallocate
+  max_vus: 500 # Maximum number of virtual users
+  rate: 50 # Requests per second
+  duration: "30m" # Test duration (e.g., "30s", "5m", "1h")
+  target_path: "/" # Path to test (e.g., "/", "/api/users")
+  connection_timeout: "10s" # Connection timeout
+  request_timeout: "30s" # Request timeout
+  graceful_stop: "30s" # Graceful stop duration
