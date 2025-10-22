@@ -1,0 +1,166 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: '1.21'
+
+jobs:
+  build:
+    name: Build Release Binaries
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            artifact_name: harbor
+            asset_name: harbor-linux-amd64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            artifact_name: harbor
+            asset_name: harbor-linux-arm64
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            artifact_name: harbor
+            asset_name: harbor-macos-amd64
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            artifact_name: harbor
+            asset_name: harbor-macos-arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build CLI binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -v -ldflags="-s -w" -o ${{ matrix.artifact_name }} ./cmd/cli
+
+      - name: Create tarball
+        run: |
+          tar czf ${{ matrix.asset_name }}.tar.gz ${{ matrix.artifact_name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}.tar.gz
+
+  create-release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          # Get the previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || git rev-list --max-parents=0 HEAD)
+          CURRENT_TAG=${GITHUB_REF#refs/tags/}
+
+          # Generate changelog
+          echo "## What's Changed" > release_notes.md
+          echo "" >> release_notes.md
+
+          # Get commits between tags
+          git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges >> release_notes.md
+
+          echo "" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "## Installation" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "Download the appropriate binary for your platform and extract it:" >> release_notes.md
+          echo "" >> release_notes.md
+          echo '```bash' >> release_notes.md
+          echo "# Linux x86_64" >> release_notes.md
+          echo "curl -LO https://github.com/dihmeetree/harbor/releases/download/${CURRENT_TAG}/harbor-linux-amd64.tar.gz" >> release_notes.md
+          echo "tar xzf harbor-linux-amd64.tar.gz" >> release_notes.md
+          echo "sudo mv harbor /usr/local/bin/" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "# Linux ARM64" >> release_notes.md
+          echo "curl -LO https://github.com/dihmeetree/harbor/releases/download/${CURRENT_TAG}/harbor-linux-arm64.tar.gz" >> release_notes.md
+          echo "tar xzf harbor-linux-arm64.tar.gz" >> release_notes.md
+          echo "sudo mv harbor /usr/local/bin/" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "# macOS (Intel)" >> release_notes.md
+          echo "curl -LO https://github.com/dihmeetree/harbor/releases/download/${CURRENT_TAG}/harbor-macos-amd64.tar.gz" >> release_notes.md
+          echo "tar xzf harbor-macos-amd64.tar.gz" >> release_notes.md
+          echo "sudo mv harbor /usr/local/bin/" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "# macOS (Apple Silicon)" >> release_notes.md
+          echo "curl -LO https://github.com/dihmeetree/harbor/releases/download/${CURRENT_TAG}/harbor-macos-arm64.tar.gz" >> release_notes.md
+          echo "tar xzf harbor-macos-arm64.tar.gz" >> release_notes.md
+          echo "sudo mv harbor /usr/local/bin/" >> release_notes.md
+          echo '```' >> release_notes.md
+          echo "" >> release_notes.md
+          echo "## Quick Start" >> release_notes.md
+          echo "" >> release_notes.md
+          echo '```bash' >> release_notes.md
+          echo "# Initialize configuration" >> release_notes.md
+          echo "harbor init" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "# Set your Hetzner API token" >> release_notes.md
+          echo "export HETZNER_API_TOKEN=\"your-token\"" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "# Deploy infrastructure" >> release_notes.md
+          echo "harbor deploy" >> release_notes.md
+          echo '```' >> release_notes.md
+          echo "" >> release_notes.md
+          echo "See [README.md](https://github.com/dihmeetree/harbor/blob/main/README.md) for full documentation." >> release_notes.md
+
+          cat release_notes.md
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          find . -name "*.tar.gz" -exec sha256sum {} \; > ../SHA256SUMS
+          cd ..
+          cat SHA256SUMS
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          body_path: release_notes.md
+          files: |
+            artifacts/**/*.tar.gz
+            SHA256SUMS
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,38 @@
+# Harbor state and SSH keys
+.harbor/
+
+# Binaries
+cli
+api
+harbor
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+
+# Configuration files (may contain secrets)
+harbor.yaml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Certs
+certs/

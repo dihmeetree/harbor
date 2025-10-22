@@ -1,0 +1,75 @@
+# =============================================================================
+# Continuous Integration Pipeline for Harbor
+#
+# This workflow ensures code quality, security, and functionality by running
+# comprehensive checks on every push and pull request to the main branch.
+#
+# Pipeline stages:
+# 1. Setup: Install Go toolchain and setup caching for faster builds
+# 2. Build: Verify code compiles successfully
+# 3. Format: Enforce consistent code formatting with gofmt
+# 4. Vet: Run go vet for code quality checks
+# 5. Test: Execute test suite to verify functionality
+# 6. Lint: Run staticcheck for additional code analysis
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  GO_VERSION: "1.21"
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout the repository code
+      - uses: actions/checkout@v4
+
+      # Install Go toolchain
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # Download dependencies
+      - name: Download dependencies
+        run: go mod download
+
+      # Verify that the code compiles successfully
+      - name: Build CLI
+        run: go build -v -o harbor ./cmd/cli
+
+      # Build autoscaler
+      - name: Build Autoscaler
+        run: go build -v -o autoscaler ./cmd/autoscaler
+
+      # Enforce consistent code formatting across the codebase
+      - name: Check formatting
+        run: |
+          if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+            echo "The following files are not formatted:"
+            gofmt -s -l .
+            exit 1
+          fi
+
+      # Run go vet to catch common mistakes
+      - name: Run go vet
+        run: go vet ./...
+
+      # Execute the test suite to verify functionality
+      - name: Run tests
+        run: go test -v -race ./...
+
+      # Install and run staticcheck for additional linting
+      - name: Install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@latest
+
+      - name: Run staticcheck
+        run: staticcheck ./...
