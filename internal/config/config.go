@@ -9,16 +9,16 @@ import (
 
 // Config represents the main configuration structure
 type Config struct {
-	Provider      string            `yaml:"provider"`
-	Server        ServerConfig      `yaml:"server"`
-	Network       NetworkConfig     `yaml:"network"`
-	Firewall      FirewallConfig    `yaml:"firewall"`
-	Container     ContainerConfig   `yaml:"container"`
-	LoadBalancer  PoolConfig        `yaml:"loadbalancer"`
-	App           PoolConfig        `yaml:"app"`
-	APISIX        APISIXConfig      `yaml:"apisix"`
-	Monitoring    MonitoringConfig  `yaml:"monitoring"`
-	Autoscaler    AutoscalerConfig  `yaml:"autoscaler"`
+	Provider     string           `yaml:"provider"`
+	Server       ServerConfig     `yaml:"server"`
+	Network      NetworkConfig    `yaml:"network"`
+	Firewall     FirewallConfig   `yaml:"firewall"`
+	Container    ContainerConfig  `yaml:"container"`
+	LoadBalancer PoolConfig       `yaml:"loadbalancer"`
+	App          PoolConfig       `yaml:"app"`
+	APISIX       APISIXConfig     `yaml:"apisix"`
+	Monitoring   MonitoringConfig `yaml:"monitoring"`
+	Autoscaler   AutoscalerConfig `yaml:"autoscaler"`
 }
 
 // ServerConfig represents server configuration

@@ -12,25 +12,25 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 	"github.com/dihmeetree/harbor/internal/apisix"
 	"github.com/dihmeetree/harbor/internal/config"
 	"github.com/dihmeetree/harbor/internal/database"
 	"github.com/dihmeetree/harbor/internal/orchestrator"
 	"github.com/dihmeetree/harbor/pkg/models"
+	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 )
 
 // Autoscaler monitors metrics and scales infrastructure
 type Autoscaler struct {
-	config          *config.Config
-	prometheusURL   string
-	hetznerToken    string
-	hetznerClient   *hcloud.Client
-	apisixClient    *apisix.Client
-	deployer        *orchestrator.Deployer
-	lastScaleTime   map[string]time.Time
-	scaleLock       sync.Mutex
-	stopChan        chan struct{}
+	config        *config.Config
+	prometheusURL string
+	hetznerToken  string
+	hetznerClient *hcloud.Client
+	apisixClient  *apisix.Client
+	deployer      *orchestrator.Deployer
+	lastScaleTime map[string]time.Time
+	scaleLock     sync.Mutex
+	stopChan      chan struct{}
 }
 
 // MetricResult represents a Prometheus query result
@@ -291,7 +291,7 @@ func (a *Autoscaler) scaleUp(ctx context.Context, roleLabel string, poolName str
 	var serverType, location, image string
 	var baseName string
 	switch roleLabel {
-case "lb":
+	case "lb":
 		serverType = a.config.LoadBalancer.ServerType
 		location = a.config.LoadBalancer.Location
 		image = a.config.LoadBalancer.Image

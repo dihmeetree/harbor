@@ -915,7 +915,7 @@ func (d *Deployer) DeployToServer(serverIP string, roleLabel string, controlPlan
 
 	// Deploy services based on role
 	switch roleLabel {
-case "lb":
+	case "lb":
 		d.log(deploymentID, "info", fmt.Sprintf("Deploying data plane services on %s...", serverIP))
 		if err := d.DeployDataPlane(deploymentID, server, controlPlaneIP); err != nil {
 			return fmt.Errorf("failed to deploy data plane: %w", err)

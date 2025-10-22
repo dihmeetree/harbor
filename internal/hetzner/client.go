@@ -67,8 +67,8 @@ func getNetworkZoneFromLocation(location string) hcloud.NetworkZone {
 		"hel1": hcloud.NetworkZoneEUCentral, // Helsinki
 
 		// US zones
-		"ash":  hcloud.NetworkZoneUSEast,    // Ashburn
-		"hil":  hcloud.NetworkZoneUSWest,    // Hillsboro
+		"ash": hcloud.NetworkZoneUSEast, // Ashburn
+		"hil": hcloud.NetworkZoneUSWest, // Hillsboro
 	}
 
 	// Default to eu-central if location not found
