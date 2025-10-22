@@ -716,6 +716,14 @@ func (a *Autoscaler) updateK6Config(ctx context.Context) error {
 	// SSH to control plane to recreate k6 container
 	publicIP := controlPlane.PublicNet.IPv4.IP.String()
 
+	// Get the actual docker network name (docker compose prefixes it)
+	networkCmd := "docker network ls --filter name=apisix --format '{{.Name}}' | head -1"
+	networkName, err := a.executeSSHCommand(publicIP, networkCmd)
+	if err != nil || networkName == "" {
+		networkName = "harbor_apisix" // Default fallback
+	}
+	networkName = strings.TrimSpace(networkName)
+
 	// Stop and remove existing k6 container
 	// We can't use docker-compose because it has the old LB_TARGETS baked into the yml file
 	// Instead, we'll remove the container and run it directly with docker run
@@ -760,7 +768,7 @@ func (a *Autoscaler) updateK6Config(ctx context.Context) error {
 
 	// Run k6 with updated targets
 	runCmd := fmt.Sprintf(`docker run -d --name k6 \
-		--network apisix \
+		--network %s \
 		--restart always \
 		-e "LB_TARGETS=%s" \
 		-e "RATE=%d" \
@@ -773,6 +781,7 @@ func (a *Autoscaler) updateK6Config(ctx context.Context) error {
 		-e "GRACEFUL_STOP=%s" \
 		-v /opt/harbor/k6:/scripts:ro \
 		grafana/k6:latest run /scripts/loadtest.js`,
+		networkName,
 		lbTargets,
 		rate,
 		duration,

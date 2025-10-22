@@ -281,6 +281,16 @@ func (m *ManualScaler) ScaleUp(ctx context.Context, role string, poolName string
 		return fmt.Errorf("failed to update Prometheus configuration: %w", err)
 	}
 
+	// Update k6 targets if k6 is enabled and we scaled load balancers
+	if m.config.K6.Enabled && role == "lb" {
+		fmt.Println("[info] Updating k6 load balancer targets")
+		if err := m.updateK6Targets(ctx, dataPlanes); err != nil {
+			fmt.Printf("[warn] Failed to update k6 targets: %v\n", err)
+		} else {
+			fmt.Println("[info] ✓ k6 targets updated")
+		}
+	}
+
 	fmt.Printf("[info] ✓ Successfully scaled %s to %d servers\n", poolName, startIndex+count-1)
 
 	return nil
@@ -511,7 +521,110 @@ func (m *ManualScaler) ScaleDown(ctx context.Context, role string, poolName stri
 		return fmt.Errorf("failed to update Prometheus configuration: %w", err)
 	}
 
+	// Update k6 targets if k6 is enabled and we scaled load balancers
+	if m.config.K6.Enabled && role == "lb" {
+		fmt.Println("[info] Updating k6 load balancer targets")
+		if err := m.updateK6Targets(ctx, dataPlanes); err != nil {
+			fmt.Printf("[warn] Failed to update k6 targets: %v\n", err)
+		} else {
+			fmt.Println("[info] ✓ k6 targets updated")
+		}
+	}
+
 	fmt.Printf("[info] ✓ Successfully scaled %s to %d servers\n", poolName, len(hetznerServers))
+
+	return nil
+}
+
+// updateK6Targets updates k6 load balancer targets by recreating the container
+func (m *ManualScaler) updateK6Targets(ctx context.Context, dataPlanes []*models.Server) error {
+	// Build LB_TARGETS comma-separated list
+	var targets []string
+	for _, dp := range dataPlanes {
+		if dp.PrivateIP != "" {
+			targets = append(targets, fmt.Sprintf("http://%s", dp.PrivateIP))
+		}
+	}
+	lbTargets := strings.Join(targets, ",")
+
+	// Get the actual docker network name (docker compose prefixes it)
+	networkCmd := "docker network ls --filter name=apisix --format '{{.Name}}' | head -1"
+	networkName, err := m.sshClient.Execute(networkCmd)
+	if err != nil || networkName == "" {
+		networkName = "harbor_apisix" // Default fallback
+	}
+	networkName = strings.TrimSpace(networkName)
+
+	// Remove existing k6 container
+	removeCmd := "docker rm -f k6 2>/dev/null || true"
+	if _, err := m.sshClient.Execute(removeCmd); err != nil {
+		return fmt.Errorf("failed to remove k6 container: %w", err)
+	}
+
+	// Set defaults for k6 config
+	rate := m.config.K6.Rate
+	if rate == 0 {
+		rate = 10
+	}
+	duration := m.config.K6.Duration
+	if duration == "" {
+		duration = "30s"
+	}
+	preallocatedVUs := m.config.K6.PreallocatedVUs
+	if preallocatedVUs == 0 {
+		preallocatedVUs = 10
+	}
+	maxVUs := m.config.K6.MaxVUs
+	if maxVUs == 0 {
+		maxVUs = 100
+	}
+	targetPath := m.config.K6.TargetPath
+	if targetPath == "" {
+		targetPath = "/"
+	}
+	connectionTimeout := m.config.K6.ConnectionTimeout
+	if connectionTimeout == "" {
+		connectionTimeout = "10s"
+	}
+	requestTimeout := m.config.K6.RequestTimeout
+	if requestTimeout == "" {
+		requestTimeout = "30s"
+	}
+	gracefulStop := m.config.K6.GracefulStop
+	if gracefulStop == "" {
+		gracefulStop = "30s"
+	}
+
+	// Run k6 with updated targets
+	runCmd := fmt.Sprintf(`docker run -d --name k6 \
+		--network %s \
+		--restart always \
+		-e "LB_TARGETS=%s" \
+		-e "RATE=%d" \
+		-e "DURATION=%s" \
+		-e "PREALLOCATED_VUS=%d" \
+		-e "MAX_VUS=%d" \
+		-e "TARGET_PATH=%s" \
+		-e "CONNECTION_TIMEOUT=%s" \
+		-e "REQUEST_TIMEOUT=%s" \
+		-e "GRACEFUL_STOP=%s" \
+		-v /opt/harbor/k6:/scripts:ro \
+		grafana/k6:latest run /scripts/loadtest.js`,
+		networkName,
+		lbTargets,
+		rate,
+		duration,
+		preallocatedVUs,
+		maxVUs,
+		targetPath,
+		connectionTimeout,
+		requestTimeout,
+		gracefulStop)
+
+	output, err := m.sshClient.Execute(runCmd)
+	if err != nil {
+		return fmt.Errorf("failed to start k6 container: %w (output: %s)", err, output)
+	}
 
 	return nil
 }
