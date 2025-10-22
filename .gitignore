@@ -1,10 +1,11 @@
 # Harbor state and SSH keys
 .harbor/
 
-# Binaries
-cli
-api
-harbor
+# Binaries (in root directory only)
+/cli
+/api
+/harbor
+/autoscaler
 *.exe
 *.exe~
 *.dll
