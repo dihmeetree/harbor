@@ -60,7 +60,7 @@ harbor deploy
 This will:
 - ✅ Create infrastructure (networks, firewalls, servers)
 - ✅ Install Docker on all servers
-- ✅ Deploy APISIX control plane + etcd + Prometheus + Grafana + Autoscaler
+- ✅ Deploy APISIX control plane + etcd + Prometheus + Grafana + Autoscaler + k6 (if enabled)
 - ✅ Deploy APISIX data planes
 - ✅ Deploy your app
 - ✅ Configure APISIX routes and upstreams
@@ -227,7 +227,8 @@ docker logs etcd
 3. **Configure Custom Routes**: Add more APISIX routes (including Grafana domain routing)
 4. **Deploy Your App**: Replace nginx with your application
 5. **Tune Autoscaler**: Adjust CPU/memory thresholds in `harbor.yaml`
-6. **Set Up CI/CD**: Automate deployments
+6. **Enable Load Testing**: Set `k6.enabled: true` in `harbor.yaml` to continuously test your load balancers
+7. **Set Up CI/CD**: Automate deployments
 
 ## Support
 

@@ -16,6 +16,7 @@ import (
 	"github.com/dihmeetree/harbor/internal/config"
 	"github.com/dihmeetree/harbor/internal/database"
 	"github.com/dihmeetree/harbor/internal/orchestrator"
+	"github.com/dihmeetree/harbor/internal/ssh"
 	"github.com/dihmeetree/harbor/pkg/models"
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 )
@@ -429,6 +430,16 @@ func (a *Autoscaler) scaleUp(ctx context.Context, roleLabel string, poolName str
 		a.log("info", fmt.Sprintf("[%s] Prometheus configuration updated", poolName))
 	}
 
+	// Update k6 targets if k6 is enabled and we scaled data planes
+	if a.config.K6.Enabled && roleLabel == "lb" {
+		a.log("info", fmt.Sprintf("[%s] Updating k6 load balancer targets", poolName))
+		if err := a.updateK6Config(ctx); err != nil {
+			a.log("warn", fmt.Sprintf("[%s] Failed to update k6 config: %v", poolName, err))
+		} else {
+			a.log("info", fmt.Sprintf("[%s] k6 configuration updated and restarted", poolName))
+		}
+	}
+
 	a.log("info", fmt.Sprintf("[%s] Scale up completed for %s", poolName, baseName))
 	return nil
 }
@@ -501,6 +512,16 @@ func (a *Autoscaler) scaleDown(ctx context.Context, roleLabel string, poolName s
 		a.log("warn", fmt.Sprintf("[%s] Failed to update Prometheus config: %v", poolName, err))
 	} else {
 		a.log("info", fmt.Sprintf("[%s] Prometheus configuration updated", poolName))
+	}
+
+	// Update k6 targets if k6 is enabled and we scaled data planes
+	if a.config.K6.Enabled && roleLabel == "lb" {
+		a.log("info", fmt.Sprintf("[%s] Updating k6 load balancer targets", poolName))
+		if err := a.updateK6Config(ctx); err != nil {
+			a.log("warn", fmt.Sprintf("[%s] Failed to update k6 config: %v", poolName, err))
+		} else {
+			a.log("info", fmt.Sprintf("[%s] k6 configuration updated and restarted", poolName))
+		}
 	}
 
 	a.log("info", fmt.Sprintf("[%s] Scale down completed - removed %s", poolName, serverToRemove.Name))
@@ -654,6 +675,139 @@ func (a *Autoscaler) updatePrometheusConfig(ctx context.Context) error {
 
 	// Call deployer's UpdatePrometheusConfig
 	return a.deployer.UpdatePrometheusConfig(0, controlPlaneModel, dataPlaneModels, appServerModels)
+}
+
+// updateK6Config updates k6 load balancer targets by recreating the container
+func (a *Autoscaler) updateK6Config(ctx context.Context) error {
+	// Get control plane
+	controlPlanes, err := a.hetznerClient.Server.AllWithOpts(ctx, hcloud.ServerListOpts{
+		ListOpts: hcloud.ListOpts{
+			LabelSelector: "role=control",
+		},
+	})
+	if err != nil || len(controlPlanes) == 0 {
+		return fmt.Errorf("failed to get control plane: %w", err)
+	}
+	controlPlane := controlPlanes[0]
+
+	// Get all data planes
+	dataPlanes, err := a.hetznerClient.Server.AllWithOpts(ctx, hcloud.ServerListOpts{
+		ListOpts: hcloud.ListOpts{
+			LabelSelector: "role=lb",
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get data planes: %w", err)
+	}
+
+	// Build LB_TARGETS comma-separated list
+	var targets []string
+	for _, dp := range dataPlanes {
+		var privateIP string
+		if len(dp.PrivateNet) > 0 {
+			privateIP = dp.PrivateNet[0].IP.String()
+		}
+		if privateIP != "" {
+			targets = append(targets, fmt.Sprintf("http://%s", privateIP))
+		}
+	}
+	lbTargets := strings.Join(targets, ",")
+
+	// SSH to control plane to recreate k6 container
+	publicIP := controlPlane.PublicNet.IPv4.IP.String()
+
+	// Stop and remove existing k6 container
+	// We can't use docker-compose because it has the old LB_TARGETS baked into the yml file
+	// Instead, we'll remove the container and run it directly with docker run
+	removeCmd := "docker rm -f k6 2>/dev/null || true"
+	if _, err := a.executeSSHCommand(publicIP, removeCmd); err != nil {
+		a.log("warn", fmt.Sprintf("Failed to remove k6 container (may not exist): %v", err))
+	}
+
+	// Set defaults for k6 config
+	rate := a.config.K6.Rate
+	if rate == 0 {
+		rate = 10
+	}
+	duration := a.config.K6.Duration
+	if duration == "" {
+		duration = "30s"
+	}
+	preallocatedVUs := a.config.K6.PreallocatedVUs
+	if preallocatedVUs == 0 {
+		preallocatedVUs = 10
+	}
+	maxVUs := a.config.K6.MaxVUs
+	if maxVUs == 0 {
+		maxVUs = 100
+	}
+	targetPath := a.config.K6.TargetPath
+	if targetPath == "" {
+		targetPath = "/"
+	}
+	connectionTimeout := a.config.K6.ConnectionTimeout
+	if connectionTimeout == "" {
+		connectionTimeout = "10s"
+	}
+	requestTimeout := a.config.K6.RequestTimeout
+	if requestTimeout == "" {
+		requestTimeout = "30s"
+	}
+	gracefulStop := a.config.K6.GracefulStop
+	if gracefulStop == "" {
+		gracefulStop = "30s"
+	}
+
+	// Run k6 with updated targets
+	runCmd := fmt.Sprintf(`docker run -d --name k6 \
+		--network apisix \
+		--restart always \
+		-e "LB_TARGETS=%s" \
+		-e "RATE=%d" \
+		-e "DURATION=%s" \
+		-e "PREALLOCATED_VUS=%d" \
+		-e "MAX_VUS=%d" \
+		-e "TARGET_PATH=%s" \
+		-e "CONNECTION_TIMEOUT=%s" \
+		-e "REQUEST_TIMEOUT=%s" \
+		-e "GRACEFUL_STOP=%s" \
+		-v /opt/harbor/k6:/scripts:ro \
+		grafana/k6:latest run /scripts/loadtest.js`,
+		lbTargets,
+		rate,
+		duration,
+		preallocatedVUs,
+		maxVUs,
+		targetPath,
+		connectionTimeout,
+		requestTimeout,
+		gracefulStop)
+
+	if output, err := a.executeSSHCommand(publicIP, runCmd); err != nil {
+		return fmt.Errorf("failed to start k6 container: %w (output: %s)", err, output)
+	}
+
+	return nil
+}
+
+// executeSSHCommand executes a command via SSH on a server
+func (a *Autoscaler) executeSSHCommand(host string, command string) (string, error) {
+	// Get SSH key path
+	sshKeyPath := os.Getenv("SSH_KEY_PATH")
+	if sshKeyPath == "" {
+		homeDir, _ := os.UserHomeDir()
+		sshKeyPath = fmt.Sprintf("%s/.harbor/ssh/id_rsa", homeDir)
+	}
+
+	// Create SSH client
+	sshClient, err := ssh.New(host, "root", sshKeyPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create SSH client: %w", err)
+	}
+	defer sshClient.Close()
+
+	output, err := sshClient.Execute(command)
+	return output, err
 }
 
 // log logs a message

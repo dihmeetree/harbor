@@ -126,6 +126,28 @@ services:
       - prometheus
       - apisix-control-plane
 {{end}}
+{{if .K6Enabled}}
+  # k6 Load Testing
+  k6:
+    container_name: k6
+    image: grafana/k6:latest
+    restart: always
+    command: run /scripts/loadtest.js
+    environment:
+      - LB_TARGETS={{.K6LBTargets}}
+      - RATE={{.K6Rate}}
+      - DURATION={{.K6Duration}}
+      - PREALLOCATED_VUS={{.K6PreallocatedVUs}}
+      - MAX_VUS={{.K6MaxVUs}}
+      - TARGET_PATH={{.K6TargetPath}}
+      - CONNECTION_TIMEOUT={{.K6ConnectionTimeout}}
+      - REQUEST_TIMEOUT={{.K6RequestTimeout}}
+      - GRACEFUL_STOP={{.K6GracefulStop}}
+    volumes:
+      - ./k6:/scripts:ro
+    networks:
+      - apisix
+{{end}}
 
 networks:
   apisix:
@@ -388,17 +410,27 @@ http {
 
 // TemplateData holds data for template rendering
 type TemplateData struct {
-	PrometheusPort    int
-	CAdvisorPort      int
-	NodeExporterPort  int
-	AppImage          string
-	APIKey            string
-	ControlPlaneIP    string
-	DataPlaneIPs      []string
-	AppServerIPs      []string
-	ServerID          string
-	AutoscalerEnabled bool
-	HetznerToken      string
+	PrometheusPort      int
+	CAdvisorPort        int
+	NodeExporterPort    int
+	AppImage            string
+	APIKey              string
+	ControlPlaneIP      string
+	DataPlaneIPs        []string
+	AppServerIPs        []string
+	ServerID            string
+	AutoscalerEnabled   bool
+	HetznerToken        string
+	K6Enabled           bool
+	K6PreallocatedVUs   int
+	K6MaxVUs            int
+	K6Rate              int
+	K6Duration          string
+	K6TargetPath        string
+	K6ConnectionTimeout string
+	K6RequestTimeout    string
+	K6GracefulStop      string
+	K6LBTargets         string
 }
 
 // RenderTemplate renders a template with the given data

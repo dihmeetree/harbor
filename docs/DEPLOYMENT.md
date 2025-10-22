@@ -14,6 +14,7 @@ Harbor is now fully functional and deploys a complete APISIX-based infrastructur
    - Prometheus (Metrics aggregation)
    - Grafana (Metrics visualization)
    - Autoscaler (Automatic server scaling based on metrics)
+   - k6 (Optional load testing targeting data plane servers)
    - cAdvisor (Container metrics)
    - node-exporter (System metrics)
 
@@ -218,6 +219,28 @@ monitoring:
   prometheus_port: 9090
   cadvisor_port: 8080
   node_exporter_port: 9100
+
+autoscaler:
+  enabled: true
+  check_interval: 30
+  cooldown: 300
+  cpu_threshold_up: 70.0
+  cpu_threshold_down: 30.0
+  mem_threshold_up: 80.0
+  mem_threshold_down: 40.0
+  min_replicas: 1
+  max_replicas: 10
+
+k6:
+  enabled: false # Set to true to enable continuous load testing
+  preallocated_vus: 10
+  max_vus: 100
+  rate: 10 # Requests per second
+  duration: "30s"
+  target_path: "/"
+  connection_timeout: "10s"
+  request_timeout: "30s"
+  graceful_stop: "30s"
 ```
 
 ## Usage
@@ -347,6 +370,7 @@ docker logs apisix-data-plane
 3. **Add More Routes**: Configure additional routes in the config (including Grafana routing via APISIX)
 4. **Access Grafana**: Login at `http://<control-plane-ip>:3000` (default: admin/admin) to visualize metrics
 5. **Configure Autoscaling**: Customize autoscaler thresholds in `harbor.yaml` (already enabled by default)
+6. **Enable Load Testing**: Set `k6.enabled: true` in `harbor.yaml` to continuously test your load balancers
 
 ## State Management
 

@@ -27,6 +27,7 @@ Harbor deploys three types of servers:
 - Prometheus (Metrics aggregation)
 - Grafana (Metrics visualization with pre-configured dashboards)
 - Autoscaler (Automatic horizontal scaling based on CPU/memory metrics)
+- k6 (Optional load testing targeting data planes)
 - cAdvisor (Container metrics)
 - node-exporter (System metrics)
 

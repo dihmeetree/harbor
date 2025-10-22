@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/dihmeetree/harbor/internal/docker"
 	"github.com/dihmeetree/harbor/internal/ssh"
 	"github.com/dihmeetree/harbor/pkg/models"
+	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 )
 
 // Deployer handles service deployment to servers
@@ -52,17 +54,30 @@ func (d *Deployer) DeployServicesOnly(ctx context.Context) error {
 	deploymentID := deployment.ID
 	d.log(deploymentID, "info", "Starting service redeployment")
 
-	// Get server groups
-	controlPlanes, _ := d.serverRepo.GetByRole(models.RoleControlPlane)
-	dataPlanes, _ := d.serverRepo.GetByRole(models.RoleDataPlane)
-	appServers, _ := d.serverRepo.GetByRole(models.RoleApp)
+	// Query Hetzner API directly for current servers (ignore local database)
+	// This ensures we only redeploy to servers that actually exist
+	hetznerToken := os.Getenv("HETZNER_API_TOKEN")
+	if hetznerToken == "" {
+		_ = d.deployRepo.UpdateStatus(deploymentID, "failed")
+		return fmt.Errorf("HETZNER_API_TOKEN environment variable is required")
+	}
+
+	// Get servers from Hetzner by role labels
+	d.log(deploymentID, "info", "Querying Hetzner API for current servers...")
+
+	controlPlanes, dataPlanes, appServers, err := d.getServersFromHetzner(ctx, hetznerToken)
+	if err != nil {
+		_ = d.deployRepo.UpdateStatus(deploymentID, "failed")
+		return fmt.Errorf("failed to get servers from Hetzner: %w", err)
+	}
 
 	if len(controlPlanes) == 0 {
 		_ = d.deployRepo.UpdateStatus(deploymentID, "failed")
-		return fmt.Errorf("no control plane server found")
+		return fmt.Errorf("no control plane server found in Hetzner")
 	}
 
 	controlPlane := controlPlanes[0]
+	d.log(deploymentID, "info", fmt.Sprintf("Found: 1 control plane, %d data planes, %d app servers", len(dataPlanes), len(appServers)))
 
 	// Stop and remove existing containers on all servers
 	d.log(deploymentID, "info", "Stopping existing containers...")
@@ -78,9 +93,9 @@ func (d *Deployer) DeployServicesOnly(ctx context.Context) error {
 		sshClient.Close()
 	}
 
-	// Deploy control plane
+	// Deploy control plane (pass data planes for k6 target configuration)
 	d.log(deploymentID, "info", "Deploying control plane services")
-	if err := d.DeployControlPlane(deploymentID, controlPlane); err != nil {
+	if err := d.DeployControlPlaneWithServers(deploymentID, controlPlane, dataPlanes, appServers); err != nil {
 		_ = d.deployRepo.UpdateStatus(deploymentID, "failed")
 		return fmt.Errorf("failed to deploy control plane: %w", err)
 	}
@@ -328,8 +343,16 @@ func (d *Deployer) InstallDocker(deploymentID int64, servers []*models.Server) e
 	return nil
 }
 
-// DeployControlPlane deploys services to the control plane server
+// DeployControlPlane deploys services to the control plane server (queries DB for servers)
 func (d *Deployer) DeployControlPlane(deploymentID int64, server *models.Server) error {
+	// Get servers from database
+	dataPlanes, _ := d.serverRepo.GetByRole(models.RoleDataPlane)
+	appServers, _ := d.serverRepo.GetByRole(models.RoleApp)
+	return d.DeployControlPlaneWithServers(deploymentID, server, dataPlanes, appServers)
+}
+
+// DeployControlPlaneWithServers deploys services to the control plane server with provided server lists
+func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *models.Server, dataPlanes, appServers []*models.Server) error {
 	sshClient, err := ssh.New(server.PublicIP, "root", d.privateKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to connect via SSH: %w", err)
@@ -341,14 +364,69 @@ func (d *Deployer) DeployControlPlane(deploymentID int64, server *models.Server)
 		return fmt.Errorf("failed to create deployment directory: %w", err)
 	}
 
+	// Prepare k6 load balancer targets (all data plane private IPs)
+	var k6LBTargets string
+	if d.config.K6.Enabled {
+		var targets []string
+		for _, dp := range dataPlanes {
+			targets = append(targets, fmt.Sprintf("http://%s", dp.PrivateIP))
+		}
+		// Join targets with comma separator for k6 script
+		k6LBTargets = strings.Join(targets, ",")
+	}
+
+	// Set k6 defaults if not configured
+	k6PreallocatedVUs := d.config.K6.PreallocatedVUs
+	if k6PreallocatedVUs == 0 {
+		k6PreallocatedVUs = 10
+	}
+	k6MaxVUs := d.config.K6.MaxVUs
+	if k6MaxVUs == 0 {
+		k6MaxVUs = 100
+	}
+	k6Rate := d.config.K6.Rate
+	if k6Rate == 0 {
+		k6Rate = 10
+	}
+	k6Duration := d.config.K6.Duration
+	if k6Duration == "" {
+		k6Duration = "30s"
+	}
+	k6TargetPath := d.config.K6.TargetPath
+	if k6TargetPath == "" {
+		k6TargetPath = "/"
+	}
+	k6ConnectionTimeout := d.config.K6.ConnectionTimeout
+	if k6ConnectionTimeout == "" {
+		k6ConnectionTimeout = "10s"
+	}
+	k6RequestTimeout := d.config.K6.RequestTimeout
+	if k6RequestTimeout == "" {
+		k6RequestTimeout = "30s"
+	}
+	k6GracefulStop := d.config.K6.GracefulStop
+	if k6GracefulStop == "" {
+		k6GracefulStop = "30s"
+	}
+
 	// Prepare template data
 	data := TemplateData{
-		PrometheusPort:    d.config.Monitoring.PrometheusPort,
-		CAdvisorPort:      d.config.Monitoring.CAdvisorPort,
-		NodeExporterPort:  d.config.Monitoring.NodeExporterPort,
-		APIKey:            d.config.APISIX.APIKey,
-		AutoscalerEnabled: d.config.Autoscaler.Enabled,
-		HetznerToken:      os.Getenv("HETZNER_API_TOKEN"),
+		PrometheusPort:      d.config.Monitoring.PrometheusPort,
+		CAdvisorPort:        d.config.Monitoring.CAdvisorPort,
+		NodeExporterPort:    d.config.Monitoring.NodeExporterPort,
+		APIKey:              d.config.APISIX.APIKey,
+		AutoscalerEnabled:   d.config.Autoscaler.Enabled,
+		HetznerToken:        os.Getenv("HETZNER_API_TOKEN"),
+		K6Enabled:           d.config.K6.Enabled,
+		K6PreallocatedVUs:   k6PreallocatedVUs,
+		K6MaxVUs:            k6MaxVUs,
+		K6Rate:              k6Rate,
+		K6Duration:          k6Duration,
+		K6TargetPath:        k6TargetPath,
+		K6ConnectionTimeout: k6ConnectionTimeout,
+		K6RequestTimeout:    k6RequestTimeout,
+		K6GracefulStop:      k6GracefulStop,
+		K6LBTargets:         k6LBTargets,
 	}
 
 	// Render and deploy docker-compose
@@ -372,9 +450,7 @@ func (d *Deployer) DeployControlPlane(deploymentID int64, server *models.Server)
 	}
 
 	// Render and deploy Prometheus config
-	dataPlanes, _ := d.serverRepo.GetByRole(models.RoleDataPlane)
-	appServers, _ := d.serverRepo.GetByRole(models.RoleApp)
-
+	// Use the dataPlanes and appServers passed as parameters
 	dataPlaneIPs := make([]string, len(dataPlanes))
 	for i, dp := range dataPlanes {
 		dataPlaneIPs[i] = dp.PrivateIP
@@ -435,6 +511,24 @@ func (d *Deployer) DeployControlPlane(deploymentID int64, server *models.Server)
 				return fmt.Errorf("failed to copy config file: %w", err)
 			}
 			d.log(deploymentID, "info", "✓ Config copied to control plane")
+		}
+	}
+
+	// Copy k6 load test script
+	if d.config.K6.Enabled {
+		k6ScriptPath := "k6/loadtest.js"
+		if _, err := os.Stat(k6ScriptPath); err == nil {
+			d.log(deploymentID, "info", "Copying k6 load test script to control plane...")
+			// Create k6 directory
+			if _, err := sshClient.Execute("mkdir -p /opt/harbor/k6"); err != nil {
+				return fmt.Errorf("failed to create k6 directory: %w", err)
+			}
+			if err := sshClient.CopyFile(k6ScriptPath, "/opt/harbor/k6/loadtest.js"); err != nil {
+				return fmt.Errorf("failed to copy k6 script: %w", err)
+			}
+			d.log(deploymentID, "info", "✓ k6 script copied to control plane")
+		} else {
+			d.log(deploymentID, "warn", "k6 enabled but k6/loadtest.js not found")
 		}
 	}
 
@@ -939,4 +1033,77 @@ func (d *Deployer) log(deploymentID int64, level, message string) {
 		_ = d.deployRepo.AddLog(deploymentID, level, message)
 	}
 	fmt.Printf("[%s] %s\n", level, message)
+}
+
+// getServersFromHetzner queries Hetzner API for servers by role labels
+func (d *Deployer) getServersFromHetzner(ctx context.Context, token string) (controlPlanes, dataPlanes, appServers []*models.Server, err error) {
+	client := hcloud.NewClient(hcloud.WithToken(token))
+
+	// Get control plane servers
+	controlHetzner, err := client.Server.AllWithOpts(ctx, hcloud.ServerListOpts{
+		ListOpts: hcloud.ListOpts{
+			LabelSelector: "role=control",
+		},
+	})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to get control planes: %w", err)
+	}
+
+	for _, srv := range controlHetzner {
+		var privateIP string
+		if len(srv.PrivateNet) > 0 {
+			privateIP = srv.PrivateNet[0].IP.String()
+		}
+		controlPlanes = append(controlPlanes, &models.Server{
+			Name:      srv.Name,
+			PublicIP:  srv.PublicNet.IPv4.IP.String(),
+			PrivateIP: privateIP,
+		})
+	}
+
+	// Get data plane (load balancer) servers
+	lbHetzner, err := client.Server.AllWithOpts(ctx, hcloud.ServerListOpts{
+		ListOpts: hcloud.ListOpts{
+			LabelSelector: "role=lb",
+		},
+	})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to get data planes: %w", err)
+	}
+
+	for _, srv := range lbHetzner {
+		var privateIP string
+		if len(srv.PrivateNet) > 0 {
+			privateIP = srv.PrivateNet[0].IP.String()
+		}
+		dataPlanes = append(dataPlanes, &models.Server{
+			Name:      srv.Name,
+			PublicIP:  srv.PublicNet.IPv4.IP.String(),
+			PrivateIP: privateIP,
+		})
+	}
+
+	// Get app servers
+	appHetzner, err := client.Server.AllWithOpts(ctx, hcloud.ServerListOpts{
+		ListOpts: hcloud.ListOpts{
+			LabelSelector: "role=app",
+		},
+	})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to get app servers: %w", err)
+	}
+
+	for _, srv := range appHetzner {
+		var privateIP string
+		if len(srv.PrivateNet) > 0 {
+			privateIP = srv.PrivateNet[0].IP.String()
+		}
+		appServers = append(appServers, &models.Server{
+			Name:      srv.Name,
+			PublicIP:  srv.PublicNet.IPv4.IP.String(),
+			PrivateIP: privateIP,
+		})
+	}
+
+	return controlPlanes, dataPlanes, appServers, nil
 }

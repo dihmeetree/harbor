@@ -19,6 +19,7 @@ type Config struct {
 	APISIX       APISIXConfig     `yaml:"apisix"`
 	Monitoring   MonitoringConfig `yaml:"monitoring"`
 	Autoscaler   AutoscalerConfig `yaml:"autoscaler"`
+	K6           K6Config         `yaml:"k6"`
 }
 
 // ServerConfig represents server configuration
@@ -137,6 +138,19 @@ type AutoscalerConfig struct {
 	MemThresholdDown float64 `yaml:"mem_threshold_down"` // Memory % to scale down
 	MinReplicas      int     `yaml:"min_replicas"`       // Minimum replicas per pool
 	MaxReplicas      int     `yaml:"max_replicas"`       // Maximum replicas per pool
+}
+
+// K6Config represents k6 load testing configuration
+type K6Config struct {
+	Enabled           bool   `yaml:"enabled"`
+	PreallocatedVUs   int    `yaml:"preallocated_vus"`   // Number of VUs to preallocate
+	MaxVUs            int    `yaml:"max_vus"`            // Maximum number of VUs
+	Rate              int    `yaml:"rate"`               // Requests per second
+	Duration          string `yaml:"duration"`           // Test duration (e.g., "30s", "5m")
+	TargetPath        string `yaml:"target_path"`        // Path to test (e.g., "/")
+	ConnectionTimeout string `yaml:"connection_timeout"` // Connection timeout (default: "10s")
+	RequestTimeout    string `yaml:"request_timeout"`    // Request timeout (default: "30s")
+	GracefulStop      string `yaml:"graceful_stop"`      // Graceful stop duration (default: "30s")
 }
 
 // Load loads configuration from a YAML file
