@@ -49,7 +49,7 @@ loadbalancer:
   location: "ash"
   image: "ubuntu-24.04"
 
-# Application
+# Application configuration
 # These servers run your application containers, cAdvisor, and node-exporter
 app:
   enabled: true
@@ -58,7 +58,7 @@ app:
   location: "ash"
   image: "ubuntu-24.04"
 
-# APISIX Configuration
+# APISIX configuration
 apisix:
   admin_port: 9180
   api_key: "edd1c9f034335f136f87ad84b625c8f1" # Change this in production!
@@ -138,13 +138,13 @@ apisix:
       - "TLSv1.2"
       - "TLSv1.3"
 
-# Monitoring Configuration
+# Monitoring configuration
 monitoring:
   prometheus_port: 9090
   cadvisor_port: 8080
   node_exporter_port: 9100
 
-# Autoscaler Configuration
+# Autoscaler configuration
 autoscaler:
   enabled: true
   check_interval: 30 # Check metrics every 30 seconds
@@ -156,7 +156,7 @@ autoscaler:
   min_replicas: 1 # Minimum servers per pool
   max_replicas: 10 # Maximum servers per pool
 
-# k6 Load Testing Configuration
+# k6 Load Testing configuration
 k6:
   enabled: true # Set to true to enable k6 load testing
   preallocated_vus: 10 # Number of virtual users to preallocate

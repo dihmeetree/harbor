@@ -503,6 +503,39 @@ k6 targets are automatically updated when:
 
 No manual intervention required!
 
+### Manual Configuration Updates
+
+When you update k6 settings in `harbor.yaml` (rate, VUs, duration, target path, timeouts), use the restart command to apply changes:
+
+```bash
+# Edit k6 configuration in harbor.yaml
+vim harbor.yaml
+
+# Restart k6 with new settings
+harbor k6 restart
+```
+
+The restart command:
+- Stops the current k6 container
+- Queries Hetzner API for current data plane IPs (always uses fresh data)
+- Recreates k6 with updated configuration from harbor.yaml
+- Starts load testing immediately
+
+Example:
+```bash
+$ harbor k6 restart
+[info] Restarting k6 load testing container...
+[info] Control plane: harbor-control (X.X.X.X)
+[info] Targeting 3 data plane(s): http://10.0.1.3,http://10.0.1.4,http://10.0.1.5
+[info] Stopping existing k6 container...
+[info] Starting k6 with updated configuration...
+[info]   Rate: 100 req/s | VUs: 20-500 | Duration: 1h | Path: /api/health
+[info] ✓ k6 successfully restarted with latest configuration
+
+To view k6 logs:
+  ssh root@X.X.X.X "docker logs k6 --tail 100 -f"
+```
+
 ## Cost Estimate (Hetzner)
 
 With default configuration (ccx33 + 2×ccx13 + 2×ccx13):

@@ -44,6 +44,7 @@ load balancers, and observability stacks.`,
 	rootCmd.AddCommand(redeployCmd())
 	rootCmd.AddCommand(statusCmd())
 	rootCmd.AddCommand(scaleCmd())
+	rootCmd.AddCommand(k6Cmd())
 	rootCmd.AddCommand(destroyCmd())
 	rootCmd.AddCommand(versionCmd())
 }
@@ -505,6 +506,100 @@ func scaleServers(role, poolName string, targetReplicas int) error {
 	}
 
 	return nil
+}
+
+func k6Cmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "k6",
+		Short: "Manage k6 load testing",
+		Long:  "Manage k6 load testing container on the control plane",
+	}
+
+	cmd.AddCommand(k6RestartCmd())
+
+	return cmd
+}
+
+func k6RestartCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "restart",
+		Short: "Restart k6 load testing with latest configuration",
+		Long: `Restart the k6 load testing container with the latest configuration from harbor.yaml.
+This will stop the current k6 container and recreate it with updated settings including:
+- Request rate
+- Virtual users (preallocated and max)
+- Duration
+- Target path
+- Timeouts
+- Load balancer targets (all current data planes)`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+
+			// Load config
+			cfg, err := config.Load(cfgFile)
+			if err != nil {
+				return fmt.Errorf("failed to load config: %w", err)
+			}
+
+			// Check if k6 is enabled
+			if !cfg.K6.Enabled {
+				return fmt.Errorf("k6 is not enabled in configuration (k6.enabled: false)")
+			}
+
+			// Initialize database
+			db, err := database.New(dbPath)
+			if err != nil {
+				return fmt.Errorf("failed to initialize database: %w", err)
+			}
+			defer db.Close()
+
+			// Get control plane server
+			serverRepo := database.NewServerRepository(db)
+			controlPlanes, err := serverRepo.GetByRole(models.RoleControlPlane)
+			if err != nil {
+				return fmt.Errorf("failed to get control plane server: %w", err)
+			}
+
+			if len(controlPlanes) == 0 {
+				return fmt.Errorf("no control plane server found - please run 'harbor deploy' first")
+			}
+
+			controlPlane := controlPlanes[0]
+
+			// Check API token
+			apiToken := os.Getenv("HETZNER_API_TOKEN")
+			if apiToken == "" {
+				return fmt.Errorf("HETZNER_API_TOKEN environment variable not set")
+			}
+
+			// Get SSH key path
+			privateKeyPath := os.Getenv("HARBOR_SSH_KEY")
+			if privateKeyPath == "" {
+				// Try default location in project directory
+				privateKeyPath = filepath.Join(".harbor", "ssh", cfg.Server.Name+"-key")
+				if _, err := os.Stat(privateKeyPath); err != nil {
+					return fmt.Errorf("SSH key not found. Expected at: %s\nSet HARBOR_SSH_KEY environment variable or run 'harbor deploy' first", privateKeyPath)
+				}
+			}
+
+			// Initialize deployer
+			deployer := orchestrator.NewDeployer(cfg, db, privateKeyPath)
+
+			fmt.Println("[info] Restarting k6 load testing container...")
+			fmt.Printf("[info] Control plane: %s (%s)\n", controlPlane.Name, controlPlane.PublicIP)
+
+			// Restart k6
+			if err := deployer.RestartK6(ctx); err != nil {
+				return fmt.Errorf("failed to restart k6: %w", err)
+			}
+
+			fmt.Println("[info] ✓ k6 successfully restarted with latest configuration")
+			fmt.Println("\nTo view k6 logs:")
+			fmt.Printf("  ssh root@%s \"docker logs k6 --tail 100 -f\"\n", controlPlane.PublicIP)
+
+			return nil
+		},
+	}
 }
 
 func versionCmd() *cobra.Command {

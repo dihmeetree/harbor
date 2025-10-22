@@ -847,6 +847,144 @@ func (d *Deployer) UpdatePrometheusConfig(deploymentID int64, controlPlane *mode
 	return nil
 }
 
+// RestartK6 restarts the k6 load testing container with the latest configuration from harbor.yaml
+func (d *Deployer) RestartK6(ctx context.Context) error {
+	// Get control plane server
+	controlPlane, err := d.serverRepo.GetByRole(models.RoleControlPlane)
+	if err != nil {
+		return fmt.Errorf("failed to get control plane: %w", err)
+	}
+	if len(controlPlane) == 0 {
+		return fmt.Errorf("no control plane server found")
+	}
+
+	// Get all data planes from Hetzner (for accurate targets)
+	token := os.Getenv("HETZNER_API_TOKEN")
+	if token == "" {
+		return fmt.Errorf("HETZNER_API_TOKEN environment variable not set")
+	}
+
+	_, dataPlanes, _, err := d.getServersFromHetzner(ctx, token)
+	if err != nil {
+		return fmt.Errorf("failed to get servers from Hetzner: %w", err)
+	}
+
+	if len(dataPlanes) == 0 {
+		return fmt.Errorf("no data plane servers found")
+	}
+
+	// Connect to control plane via SSH
+	sshClient, err := ssh.New(controlPlane[0].PublicIP, "root", d.privateKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to connect to control plane: %w", err)
+	}
+	defer sshClient.Close()
+
+	// Build LB_TARGETS comma-separated list
+	var targets []string
+	for _, dp := range dataPlanes {
+		if dp.PrivateIP != "" {
+			targets = append(targets, fmt.Sprintf("http://%s", dp.PrivateIP))
+		}
+	}
+	lbTargets := strings.Join(targets, ",")
+
+	fmt.Printf("[info] Targeting %d data plane(s): %s\n", len(targets), lbTargets)
+
+	// Get the actual docker network name (docker compose prefixes it)
+	networkCmd := "docker network ls --filter name=apisix --format '{{.Name}}' | head -1"
+	networkName, err := sshClient.Execute(networkCmd)
+	if err != nil || networkName == "" {
+		networkName = "harbor_apisix" // Default fallback
+	}
+	networkName = strings.TrimSpace(networkName)
+
+	// Remove existing k6 container
+	fmt.Println("[info] Stopping existing k6 container...")
+	removeCmd := "docker rm -f k6 2>/dev/null || true"
+	if _, err := sshClient.Execute(removeCmd); err != nil {
+		return fmt.Errorf("failed to remove k6 container: %w", err)
+	}
+
+	// Set defaults for k6 config
+	rate := d.config.K6.Rate
+	if rate == 0 {
+		rate = 10
+	}
+
+	duration := d.config.K6.Duration
+	if duration == "" {
+		duration = "30s"
+	}
+
+	preallocatedVUs := d.config.K6.PreallocatedVUs
+	if preallocatedVUs == 0 {
+		preallocatedVUs = 10
+	}
+
+	maxVUs := d.config.K6.MaxVUs
+	if maxVUs == 0 {
+		maxVUs = 100
+	}
+
+	targetPath := d.config.K6.TargetPath
+	if targetPath == "" {
+		targetPath = "/"
+	}
+
+	connectionTimeout := d.config.K6.ConnectionTimeout
+	if connectionTimeout == "" {
+		connectionTimeout = "10s"
+	}
+
+	requestTimeout := d.config.K6.RequestTimeout
+	if requestTimeout == "" {
+		requestTimeout = "30s"
+	}
+
+	gracefulStop := d.config.K6.GracefulStop
+	if gracefulStop == "" {
+		gracefulStop = "30s"
+	}
+
+	// Run k6 with updated configuration
+	fmt.Println("[info] Starting k6 with updated configuration...")
+	fmt.Printf("[info]   Rate: %d req/s | VUs: %d-%d | Duration: %s | Path: %s\n",
+		rate, preallocatedVUs, maxVUs, duration, targetPath)
+
+	runCmd := fmt.Sprintf(`docker run -d --name k6 \
+		--network %s \
+		--restart always \
+		-e "LB_TARGETS=%s" \
+		-e "RATE=%d" \
+		-e "DURATION=%s" \
+		-e "PREALLOCATED_VUS=%d" \
+		-e "MAX_VUS=%d" \
+		-e "TARGET_PATH=%s" \
+		-e "CONNECTION_TIMEOUT=%s" \
+		-e "REQUEST_TIMEOUT=%s" \
+		-e "GRACEFUL_STOP=%s" \
+		-v /opt/harbor/k6:/scripts:ro \
+		grafana/k6:latest run /scripts/loadtest.js`,
+		networkName,
+		lbTargets,
+		rate,
+		duration,
+		preallocatedVUs,
+		maxVUs,
+		targetPath,
+		connectionTimeout,
+		requestTimeout,
+		gracefulStop)
+
+	output, err := sshClient.Execute(runCmd)
+	if err != nil {
+		return fmt.Errorf("failed to start k6 container: %w (output: %s)", err, output)
+	}
+
+	return nil
+}
+
 // waitForControlPlane waits for control plane services to be ready
 func (d *Deployer) waitForControlPlane(deploymentID int64, server *models.Server) error {
 	sshClient, err := ssh.New(server.PublicIP, "root", d.privateKeyPath)

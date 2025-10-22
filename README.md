@@ -250,11 +250,14 @@ harbor validate
 harbor deploy
 
 # Redeploy services to existing servers
+harbor redeploy
 
 # Manually scale servers
 harbor scale lb 5      # Scale load balancers to 5 servers
 harbor scale app 10    # Scale app servers to 10 servers
-harbor redeploy
+
+# Restart k6 load testing with latest config
+harbor k6 restart
 
 # Show infrastructure status
 harbor status
@@ -678,9 +681,11 @@ This creates a feedback loop where:
 3. Servers scale up/down based on load
 4. k6 automatically updates to target new data planes
 
-### Updating k6 Targets
+### Updating k6 Configuration
 
-When you manually scale data planes, k6 targets are automatically updated:
+#### Automatic Updates
+
+When you scale data planes, k6 targets are automatically updated:
 
 ```bash
 # Scale up - k6 automatically targets new data planes
@@ -691,6 +696,38 @@ harbor scale lb 2
 
 # Redeploy services - k6 refreshes all targets
 harbor redeploy
+```
+
+#### Manual Configuration Update
+
+When you change k6 settings in `harbor.yaml` (rate, VUs, duration, path, etc.), restart k6 to apply the new configuration:
+
+```bash
+# Edit harbor.yaml to change k6 settings
+vim harbor.yaml
+
+# Restart k6 with new configuration
+harbor k6 restart
+```
+
+The restart command will:
+- Stop the current k6 container
+- Query Hetzner API for current data plane IPs (ensures accurate targets)
+- Recreate k6 container with updated settings from harbor.yaml
+- Start load testing with new configuration
+
+Example output:
+```
+[info] Restarting k6 load testing container...
+[info] Control plane: harbor-control (X.X.X.X)
+[info] Targeting 3 data plane(s): http://10.0.1.3,http://10.0.1.4,http://10.0.1.5
+[info] Stopping existing k6 container...
+[info] Starting k6 with updated configuration...
+[info]   Rate: 100 req/s | VUs: 20-500 | Duration: 1h | Path: /api/health
+[info] ✓ k6 successfully restarted with latest configuration
+
+To view k6 logs:
+  ssh root@X.X.X.X "docker logs k6 --tail 100 -f"
 ```
 
 ### Disabling k6
