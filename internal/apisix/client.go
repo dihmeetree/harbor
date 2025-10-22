@@ -94,7 +94,7 @@ func (c *Client) CreateRoute(route config.APISIXRoute) error {
 	}
 
 	// Add plugins if specified (don't send empty plugins)
-	if route.Plugins != nil && len(route.Plugins) > 0 {
+	if len(route.Plugins) > 0 {
 		payload["plugins"] = route.Plugins
 	}
 
