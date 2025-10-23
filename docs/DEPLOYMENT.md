@@ -536,6 +536,16 @@ To view k6 logs:
   ssh root@X.X.X.X "docker logs k6 --tail 100 -f"
 ```
 
+### Stopping k6
+
+To temporarily stop k6 load testing:
+
+```bash
+harbor k6 stop
+```
+
+This stops and removes the k6 container while preserving your configuration. Restart anytime with `harbor k6 restart`.
+
 ## Cost Estimate (Hetzner)
 
 With default configuration (ccx33 + 2×ccx13 + 2×ccx13):

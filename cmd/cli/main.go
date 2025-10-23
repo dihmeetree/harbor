@@ -516,6 +516,7 @@ func k6Cmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(k6RestartCmd())
+	cmd.AddCommand(k6StopCmd())
 
 	return cmd
 }
@@ -596,6 +597,72 @@ This will stop the current k6 container and recreate it with updated settings in
 			fmt.Println("[info] ✓ k6 successfully restarted with latest configuration")
 			fmt.Println("\nTo view k6 logs:")
 			fmt.Printf("  ssh root@%s \"docker logs k6 --tail 100 -f\"\n", controlPlane.PublicIP)
+
+			return nil
+		},
+	}
+}
+
+func k6StopCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop",
+		Short: "Stop k6 load testing",
+		Long: `Stop and remove the k6 load testing container.
+This will completely stop load testing without removing k6 configuration.
+Use 'harbor k6 restart' to start it again later.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+
+			// Load config
+			cfg, err := config.Load(cfgFile)
+			if err != nil {
+				return fmt.Errorf("failed to load config: %w", err)
+			}
+
+			// Initialize database
+			db, err := database.New(dbPath)
+			if err != nil {
+				return fmt.Errorf("failed to initialize database: %w", err)
+			}
+			defer db.Close()
+
+			// Get control plane server
+			serverRepo := database.NewServerRepository(db)
+			controlPlanes, err := serverRepo.GetByRole(models.RoleControlPlane)
+			if err != nil {
+				return fmt.Errorf("failed to get control plane server: %w", err)
+			}
+
+			if len(controlPlanes) == 0 {
+				return fmt.Errorf("no control plane server found - please run 'harbor deploy' first")
+			}
+
+			controlPlane := controlPlanes[0]
+
+			// Get SSH key path
+			privateKeyPath := os.Getenv("HARBOR_SSH_KEY")
+			if privateKeyPath == "" {
+				// Try default location in project directory
+				privateKeyPath = filepath.Join(".harbor", "ssh", cfg.Server.Name+"-key")
+				if _, err := os.Stat(privateKeyPath); err != nil {
+					return fmt.Errorf("SSH key not found. Expected at: %s\nSet HARBOR_SSH_KEY environment variable or run 'harbor deploy' first", privateKeyPath)
+				}
+			}
+
+			// Initialize deployer
+			deployer := orchestrator.NewDeployer(cfg, db, privateKeyPath)
+
+			fmt.Println("[info] Stopping k6 load testing container...")
+			fmt.Printf("[info] Control plane: %s (%s)\n", controlPlane.Name, controlPlane.PublicIP)
+
+			// Stop k6
+			if err := deployer.StopK6(ctx); err != nil {
+				return fmt.Errorf("failed to stop k6: %w", err)
+			}
+
+			fmt.Println("[info] ✓ k6 load testing stopped")
+			fmt.Println("\nTo restart k6 with current configuration:")
+			fmt.Println("  harbor k6 restart")
 
 			return nil
 		},

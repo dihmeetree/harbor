@@ -259,6 +259,9 @@ harbor scale app 10    # Scale app servers to 10 servers
 # Restart k6 load testing with latest config
 harbor k6 restart
 
+# Stop k6 load testing
+harbor k6 stop
+
 # Show infrastructure status
 harbor status
 
@@ -730,9 +733,32 @@ To view k6 logs:
   ssh root@X.X.X.X "docker logs k6 --tail 100 -f"
 ```
 
+### Stopping k6
+
+To temporarily stop k6 load testing without changing configuration:
+
+```bash
+harbor k6 stop
+```
+
+This will:
+- Stop and remove the k6 container
+- Keep k6 configuration in harbor.yaml
+- Allow you to restart later with `harbor k6 restart`
+
+Example output:
+```
+[info] Stopping k6 load testing container...
+[info] Control plane: harbor-control (X.X.X.X)
+[info] ✓ k6 load testing stopped
+
+To restart k6 with current configuration:
+  harbor k6 restart
+```
+
 ### Disabling k6
 
-To disable k6 load testing:
+To permanently disable k6 in your deployment:
 
 ```yaml
 k6:

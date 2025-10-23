@@ -985,6 +985,45 @@ func (d *Deployer) RestartK6(ctx context.Context) error {
 	return nil
 }
 
+// StopK6 stops and removes the k6 load testing container
+func (d *Deployer) StopK6(ctx context.Context) error {
+	// Get control plane server
+	controlPlane, err := d.serverRepo.GetByRole(models.RoleControlPlane)
+	if err != nil {
+		return fmt.Errorf("failed to get control plane: %w", err)
+	}
+	if len(controlPlane) == 0 {
+		return fmt.Errorf("no control plane server found")
+	}
+
+	// Connect to control plane via SSH
+	sshClient, err := ssh.New(controlPlane[0].PublicIP, "root", d.privateKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to connect to control plane: %w", err)
+	}
+	defer sshClient.Close()
+
+	// Check if k6 container exists
+	checkCmd := "docker ps -a --filter name=k6 --format '{{.Names}}'"
+	output, err := sshClient.Execute(checkCmd)
+	if err != nil {
+		return fmt.Errorf("failed to check k6 container: %w", err)
+	}
+
+	if strings.TrimSpace(output) == "" {
+		fmt.Println("[info] k6 container not found (already stopped or never started)")
+		return nil
+	}
+
+	// Stop and remove k6 container
+	removeCmd := "docker rm -f k6"
+	if _, err := sshClient.Execute(removeCmd); err != nil {
+		return fmt.Errorf("failed to remove k6 container: %w", err)
+	}
+
+	return nil
+}
+
 // waitForControlPlane waits for control plane services to be ready
 func (d *Deployer) waitForControlPlane(deploymentID int64, server *models.Server) error {
 	sshClient, err := ssh.New(server.PublicIP, "root", d.privateKeyPath)
