@@ -134,9 +134,9 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "count(count(container_last_seen) by (name))",
+          "expr": "count(container_last_seen{name=~\".+\",server=~\"$server\"})",
           "instant": false,
-          "legendFormat": "__auto",
+          "legendFormat": "Running Containers",
           "range": true,
           "refId": "A"
         }
@@ -162,7 +162,7 @@
             "axisPlacement": "auto",
             "barAlignment": 0,
             "drawStyle": "line",
-            "fillOpacity": 0,
+            "fillOpacity": 10,
             "gradientMode": "none",
             "hideFrom": {
               "legend": false,
@@ -190,6 +190,7 @@
             }
           },
           "mappings": [],
+          "max": 100,
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -234,8 +235,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(container_cpu_usage_seconds_total{name=~\".+\"}[10m])) by (name) * 100",
-          "legendFormat": "__auto",
+          "expr": "sum(rate(container_cpu_usage_seconds_total{name=~\".+\",server=~\"$server\"}[10m])) by (name, server) * 100",
+          "legendFormat": "{{name}} ({{server}})",
           "range": true,
           "refId": "A"
         }
@@ -274,7 +275,7 @@
             "axisPlacement": "auto",
             "barAlignment": 0,
             "drawStyle": "line",
-            "fillOpacity": 0,
+            "fillOpacity": 10,
             "gradientMode": "none",
             "hideFrom": {
               "legend": false,
@@ -343,9 +344,9 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(container_memory_usage_bytes{name=~\".+\"}[10m])) by (name)",
+          "expr": "sum(rate(container_memory_usage_bytes{name=~\".+\",server=~\"$server\"}[10m])) by (name, server)",
           "instant": false,
-          "legendFormat": "__auto",
+          "legendFormat": "{{name}} ({{server}})",
           "range": true,
           "refId": "A"
         }
@@ -371,7 +372,7 @@
             "axisPlacement": "auto",
             "barAlignment": 0,
             "drawStyle": "line",
-            "fillOpacity": 0,
+            "fillOpacity": 10,
             "gradientMode": "none",
             "hideFrom": {
               "legend": false,
@@ -440,9 +441,9 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(container_memory_cache{name=~\".+\"}[10m])) by (name)",
+          "expr": "sum(rate(container_memory_cache{name=~\".+\",server=~\"$server\"}[10m])) by (name, server)",
           "instant": false,
-          "legendFormat": "__auto",
+          "legendFormat": "{{name}} ({{server}})",
           "range": true,
           "refId": "A"
         }
@@ -481,7 +482,7 @@
             "axisPlacement": "auto",
             "barAlignment": 0,
             "drawStyle": "line",
-            "fillOpacity": 0,
+            "fillOpacity": 10,
             "gradientMode": "none",
             "hideFrom": {
               "legend": false,
@@ -553,9 +554,9 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(container_fs_reads_bytes_total{name=~\".+\"}[10m])) by (name)",
+          "expr": "sum(rate(container_fs_reads_bytes_total{name=~\".+\",server=~\"$server\"}[10m])) by (name, server)",
           "instant": false,
-          "legendFormat": "__auto",
+          "legendFormat": "{{name}} ({{server}})",
           "range": true,
           "refId": "A"
         }
@@ -581,7 +582,7 @@
             "axisPlacement": "auto",
             "barAlignment": 0,
             "drawStyle": "line",
-            "fillOpacity": 0,
+            "fillOpacity": 10,
             "gradientMode": "none",
             "hideFrom": {
               "legend": false,
@@ -653,9 +654,9 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(container_fs_writes_bytes_total{name=~\".+\"}[10m])) by (name)",
+          "expr": "sum(rate(container_fs_writes_bytes_total{name=~\".+\",server=~\"$server\"}[10m])) by (name, server)",
           "instant": false,
-          "legendFormat": "__auto",
+          "legendFormat": "{{name}} ({{server}})",
           "range": true,
           "refId": "A"
         }
@@ -694,7 +695,7 @@
             "axisPlacement": "auto",
             "barAlignment": 0,
             "drawStyle": "line",
-            "fillOpacity": 0,
+            "fillOpacity": 10,
             "gradientMode": "none",
             "hideFrom": {
               "legend": false,
@@ -766,9 +767,9 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(container_network_receive_bytes_total{name=~\".+\"}[10m])) by (name)",
+          "expr": "sum(rate(container_network_receive_bytes_total{name=~\".+\",server=~\"$server\"}[10m])) by (name, server)",
           "instant": false,
-          "legendFormat": "__auto",
+          "legendFormat": "{{name}} ({{server}})",
           "range": true,
           "refId": "A"
         }
@@ -794,7 +795,7 @@
             "axisPlacement": "auto",
             "barAlignment": 0,
             "drawStyle": "line",
-            "fillOpacity": 0,
+            "fillOpacity": 10,
             "gradientMode": "none",
             "hideFrom": {
               "legend": false,
@@ -866,9 +867,9 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(container_network_transmit_bytes_total{name=~\".+\"}[10m])) by (name)",
+          "expr": "sum(rate(container_network_transmit_bytes_total{name=~\".+\",server=~\"$server\"}[10m])) by (name, server)",
           "instant": false,
-          "legendFormat": "__auto",
+          "legendFormat": "{{name}} ({{server}})",
           "range": true,
           "refId": "A"
         }
@@ -959,9 +960,9 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "count by(name) (count_over_time(container_last_seen{name=~\".+\"}[$__range]))",
+          "expr": "count by(name, server) (count_over_time(container_last_seen{name=~\".+\",server=~\"$server\"}[$__range]))",
           "instant": false,
-          "legendFormat": "__auto",
+          "legendFormat": "{{name}} ({{server}})",
           "range": true,
           "refId": "A"
         }
@@ -988,6 +989,33 @@
         "regex": "",
         "skipUrlSync": false,
         "type": "datasource"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "definition": "label_values(container_last_seen{name=~\".+\"}, server)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Server",
+        "multi": true,
+        "name": "server",
+        "options": [],
+        "query": {
+          "query": "label_values(container_last_seen{name=~\".+\"}, server)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
       }
     ]
   },

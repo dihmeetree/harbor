@@ -80,7 +80,7 @@
             "uid": "$datasourceProm"
           },
           "editorMode": "code",
-          "expr": "count(up{job=\"node-exporter\"} == 1)\n",
+          "expr": "count(up{job=\"node-exporter\",server=~\"$server\"} == 1)\n",
           "instant": false,
           "legendFormat": "__auto",
           "range": true,
@@ -146,7 +146,7 @@
             "uid": "$datasourceProm"
           },
           "editorMode": "code",
-          "expr": "max by (server) (\n  label_replace(time() - node_boot_time_seconds, \"uptime\", \"$1\", \"instance\", \"(.*)\")\n)",
+          "expr": "max by (server) (\n  label_replace(time() - node_boot_time_seconds{server=~\"$server\"}, \"uptime\", \"$1\", \"instance\", \"(.*)\")\n)",
           "instant": false,
           "legendFormat": "{{instance}}",
           "range": true,
@@ -248,7 +248,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "100 - (avg by(server) (rate(node_cpu_seconds_total{job=\"node-exporter\", mode=\"idle\"}[1m])) * 100)",
+          "expr": "100 - (avg by(server) (rate(node_cpu_seconds_total{job=\"node-exporter\",server=~\"$server\", mode=\"idle\"}[1m])) * 100)",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
@@ -353,7 +353,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "100 * (1 - (\n  (\n    (avg by(server) (node_memory_MemAvailable_bytes{job=\"node-exporter\"}) or \n    (avg by(server) (node_memory_MemFree_bytes{job=\"node-exporter\"}) + \n    avg by(server) (node_memory_Cached_bytes{job=\"node-exporter\"}) + \n    avg by(server) (node_memory_Buffers_bytes{job=\"node-exporter\"})))\n  ) / avg by(server) (node_memory_MemTotal_bytes{job=\"node-exporter\"})\n))\n",
+          "expr": "100 * (1 - (\n  (\n    (avg by(server) (node_memory_MemAvailable_bytes{job=\"node-exporter\",server=~\"$server\"}) or \n    (avg by(server) (node_memory_MemFree_bytes{job=\"node-exporter\",server=~\"$server\"}) + \n    avg by(server) (node_memory_Cached_bytes{job=\"node-exporter\",server=~\"$server\"}) + \n    avg by(server) (node_memory_Buffers_bytes{job=\"node-exporter\",server=~\"$server\"})))\n  ) / avg by(server) (node_memory_MemTotal_bytes{job=\"node-exporter\",server=~\"$server\"})\n))\n",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
@@ -455,7 +455,7 @@
             "uid": "$datasourceProm"
           },
           "editorMode": "code",
-          "expr": "avg by(server) (node_load5{job=\"node-exporter\"})",
+          "expr": "avg by(server) (node_load5{job=\"node-exporter\",server=~\"$server\"})",
           "instant": false,
           "legendFormat": "{{server}}",
           "range": true,
@@ -530,7 +530,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "100 * (node_filesystem_size_bytes{job=\"node-exporter\", mountpoint=\"/\"} - node_filesystem_free_bytes{job=\"node-exporter\", mountpoint=\"/\"}) / node_filesystem_size_bytes{job=\"node-exporter\", mountpoint=\"/\"}\n\n",
+          "expr": "100 * (node_filesystem_size_bytes{job=\"node-exporter\",server=~\"$server\", mountpoint=\"/\"} - node_filesystem_free_bytes{job=\"node-exporter\",server=~\"$server\", mountpoint=\"/\"}) / node_filesystem_size_bytes{job=\"node-exporter\",server=~\"$server\", mountpoint=\"/\"}\n\n",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
@@ -567,6 +567,33 @@
         "refresh": 1,
         "regex": "",
         "type": "datasource"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasourceProm}"
+        },
+        "definition": "label_values(node_uname_info, server)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Server",
+        "multi": true,
+        "name": "server",
+        "options": [],
+        "query": {
+          "query": "label_values(node_uname_info, server)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
       }
     ]
   },
