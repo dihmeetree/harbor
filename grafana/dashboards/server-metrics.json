@@ -457,7 +457,7 @@
           "editorMode": "code",
           "expr": "avg by(server) (node_load5{job=\"node-exporter\"})",
           "instant": false,
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{server}}",
           "range": true,
           "refId": "A"
         }
