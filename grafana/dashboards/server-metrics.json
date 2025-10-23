@@ -146,7 +146,7 @@
             "uid": "$datasourceProm"
           },
           "editorMode": "code",
-          "expr": "max by (instance) (\n  label_replace(time() - node_boot_time_seconds, \"uptime\", \"$1\", \"instance\", \"(.*)\")\n)",
+          "expr": "max by (server) (\n  label_replace(time() - node_boot_time_seconds, \"uptime\", \"$1\", \"instance\", \"(.*)\")\n)",
           "instant": false,
           "legendFormat": "{{instance}}",
           "range": true,
@@ -248,7 +248,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "100 - (avg by(instance) (rate(node_cpu_seconds_total{job=\"node-exporter\", mode=\"idle\"}[1m])) * 100)",
+          "expr": "100 - (avg by(server) (rate(node_cpu_seconds_total{job=\"node-exporter\", mode=\"idle\"}[1m])) * 100)",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
@@ -455,7 +455,7 @@
             "uid": "$datasourceProm"
           },
           "editorMode": "code",
-          "expr": "node_load5{job=\"node-exporter\"}",
+          "expr": "avg by(server) (node_load5{job=\"node-exporter\"})",
           "instant": false,
           "legendFormat": "{{instance}}",
           "range": true,
@@ -547,7 +547,11 @@
   "preload": false,
   "refresh": "10s",
   "schemaVersion": 40,
-  "tags": ["prometheus", "node-exporter", "server-monitoring"],
+  "tags": [
+    "prometheus",
+    "node-exporter",
+    "server-monitoring"
+  ],
   "templating": {
     "list": [
       {

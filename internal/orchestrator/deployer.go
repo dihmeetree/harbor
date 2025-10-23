@@ -464,6 +464,8 @@ func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *mod
 	prometheusData := TemplateData{
 		DataPlaneIPs: dataPlaneIPs,
 		AppServerIPs: appServerIPs,
+		DataPlanes:   dataPlanes,
+		AppServers:   appServers,
 	}
 
 	prometheusConfig, err := RenderTemplate(PrometheusConfigTemplate, prometheusData)
@@ -824,6 +826,8 @@ func (d *Deployer) UpdatePrometheusConfig(deploymentID int64, controlPlane *mode
 	prometheusData := TemplateData{
 		DataPlaneIPs: dataPlaneIPs,
 		AppServerIPs: appServerIPs,
+		DataPlanes:   dataPlanes,
+		AppServers:   appServers,
 	}
 
 	prometheusConfig, err := RenderTemplate(PrometheusConfigTemplate, prometheusData)

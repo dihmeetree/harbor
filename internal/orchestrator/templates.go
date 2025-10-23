@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"text/template"
+
+	"github.com/dihmeetree/harbor/pkg/models"
 )
 
 // ControlPlaneTemplate is the docker-compose template for the control plane server
@@ -374,12 +376,29 @@ scrape_configs:
   - job_name: node-exporter
     scrape_interval: 5s
     static_configs:
-      - targets: ['node-exporter:9100'{{range .DataPlaneIPs}}, '{{.}}:9100'{{end}}{{range .AppServerIPs}}, '{{.}}:9100'{{end}}]
-
+      - targets: ['node-exporter:9100']
+        labels:
+          server: 'harbor-control'
+{{range .DataPlanes}}      - targets: ['{{.PrivateIP}}:9100']
+        labels:
+          server: '{{.Name}}'
+{{end}}{{range .AppServers}}      - targets: ['{{.PrivateIP}}:9100']
+        labels:
+          server: '{{.Name}}'
+{{end}}
   - job_name: cadvisor
     scrape_interval: 5s
     static_configs:
-      - targets: ['cadvisor:8080'{{range .DataPlaneIPs}}, '{{.}}:8080'{{end}}{{range .AppServerIPs}}, '{{.}}:8080'{{end}}]
+      - targets: ['cadvisor:8080']
+        labels:
+          server: 'harbor-control'
+{{range .DataPlanes}}      - targets: ['{{.PrivateIP}}:8080']
+        labels:
+          server: '{{.Name}}'
+{{end}}{{range .AppServers}}      - targets: ['{{.PrivateIP}}:8080']
+        labels:
+          server: '{{.Name}}'
+{{end}}
 `
 
 // NginxConfigTemplate is the nginx configuration for app servers
@@ -418,6 +437,8 @@ type TemplateData struct {
 	ControlPlaneIP      string
 	DataPlaneIPs        []string
 	AppServerIPs        []string
+	DataPlanes          []*models.Server
+	AppServers          []*models.Server
 	ServerID            string
 	AutoscalerEnabled   bool
 	HetznerToken        string
