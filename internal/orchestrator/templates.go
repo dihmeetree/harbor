@@ -71,7 +71,7 @@ services:
     image: gcr.io/cadvisor/cadvisor:latest
     restart: always
     ports:
-      - '127.0.0.1:{{.CAdvisorPort}}:8080'
+      - '0.0.0.0:{{.CAdvisorPort}}:8080'
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:rw
@@ -86,7 +86,7 @@ services:
     image: prom/node-exporter:v1.9.1
     restart: always
     ports:
-      - '127.0.0.1:{{.NodeExporterPort}}:9100'
+      - '0.0.0.0:{{.NodeExporterPort}}:9100'
     pid: host
     networks:
       - apisix
@@ -187,7 +187,7 @@ services:
     image: gcr.io/cadvisor/cadvisor:latest
     restart: always
     ports:
-      - '127.0.0.1:{{.CAdvisorPort}}:8080'
+      - '0.0.0.0:{{.CAdvisorPort}}:8080'
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:rw
@@ -202,7 +202,7 @@ services:
     image: prom/node-exporter:v1.9.1
     restart: always
     ports:
-      - '127.0.0.1:{{.NodeExporterPort}}:9100'
+      - '0.0.0.0:{{.NodeExporterPort}}:9100'
     pid: host
     networks:
       - apisix
@@ -234,7 +234,7 @@ services:
     image: gcr.io/cadvisor/cadvisor:latest
     restart: always
     ports:
-      - '127.0.0.1:{{.CAdvisorPort}}:8080'
+      - '0.0.0.0:{{.CAdvisorPort}}:8080'
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:rw
@@ -249,7 +249,7 @@ services:
     image: prom/node-exporter:v1.9.1
     restart: always
     ports:
-      - '127.0.0.1:{{.NodeExporterPort}}:9100'
+      - '0.0.0.0:{{.NodeExporterPort}}:9100'
     pid: host
     networks:
       - apisix
