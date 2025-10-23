@@ -530,11 +530,11 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "100 * (node_filesystem_size_bytes{job=\"node-exporter\", mountpoint=\"/etc/hostname\"} - node_filesystem_free_bytes{job=\"node-exporter\", mountpoint=\"/etc/hostname\"}) / node_filesystem_size_bytes{job=\"node-exporter\", mountpoint=\"/etc/hostname\"}\n\n",
+          "expr": "100 * (node_filesystem_size_bytes{job=\"node-exporter\", mountpoint=\"/\"} - node_filesystem_free_bytes{job=\"node-exporter\", mountpoint=\"/\"}) / node_filesystem_size_bytes{job=\"node-exporter\", mountpoint=\"/\"}\n\n",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{server}}",
           "range": true,
           "refId": "A",
           "useBackend": false
