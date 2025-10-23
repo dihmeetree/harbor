@@ -134,8 +134,11 @@ services:
     container_name: k6
     image: grafana/k6:latest
     restart: always
-    command: run /scripts/loadtest.js
+    command: run -o experimental-prometheus-rw /scripts/loadtest.js
     environment:
+      - K6_PROMETHEUS_RW_SERVER_URL=http://prometheus:9090/api/v1/write
+      - K6_PROMETHEUS_RW_TREND_STATS=p(95),p(99),min,max,avg
+      - K6_PROMETHEUS_RW_PUSH_INTERVAL=5s
       - LB_TARGETS={{.K6LBTargets}}
       - RATE={{.K6Rate}}
       - DURATION={{.K6Duration}}

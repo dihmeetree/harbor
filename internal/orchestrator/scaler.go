@@ -412,6 +412,9 @@ func (m *ManualScaler) updateK6Targets(ctx context.Context, dataPlanes []*models
 	runCmd := fmt.Sprintf(`docker run -d --name k6 \
 		--network %s \
 		--restart always \
+		-e "K6_PROMETHEUS_RW_SERVER_URL=http://prometheus:9090/api/v1/write" \
+		-e "K6_PROMETHEUS_RW_TREND_STATS=p(95),p(99),min,max,avg" \
+		-e "K6_PROMETHEUS_RW_PUSH_INTERVAL=5s" \
 		-e "LB_TARGETS=%s" \
 		-e "RATE=%d" \
 		-e "DURATION=%s" \
@@ -422,7 +425,7 @@ func (m *ManualScaler) updateK6Targets(ctx context.Context, dataPlanes []*models
 		-e "REQUEST_TIMEOUT=%s" \
 		-e "GRACEFUL_STOP=%s" \
 		-v /opt/harbor/k6:/scripts:ro \
-		grafana/k6:latest run /scripts/loadtest.js`,
+		grafana/k6:latest run -o experimental-prometheus-rw /scripts/loadtest.js`,
 		networkName,
 		lbTargets,
 		k6Config.Rate,
