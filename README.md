@@ -588,6 +588,7 @@ k6:
 ### Performance Testing Scenarios
 
 **Light Testing** (Development/Staging):
+
 ```yaml
 k6:
   enabled: true
@@ -598,6 +599,7 @@ k6:
 ```
 
 **Moderate Testing** (Pre-production):
+
 ```yaml
 k6:
   enabled: true
@@ -608,6 +610,7 @@ k6:
 ```
 
 **Heavy Testing** (Load/Stress testing):
+
 ```yaml
 k6:
   enabled: true
@@ -620,6 +623,7 @@ k6:
 ### Performance Thresholds
 
 The k6 script includes built-in thresholds:
+
 - **p95 Latency**: 95% of requests must complete under 500ms
 - **Error Rate**: Less than 10% error rate
 
@@ -639,6 +643,7 @@ ssh root@<control-plane-ip> "docker ps | grep k6"
 ```
 
 Example k6 output:
+
 ```
 Starting load test
 Targets: http://10.0.1.3, http://10.0.1.4, http://10.0.1.5
@@ -679,6 +684,7 @@ k6:
 ```
 
 This creates a feedback loop where:
+
 1. k6 generates consistent load
 2. Autoscaler monitors metrics from Prometheus
 3. Servers scale up/down based on load
@@ -714,12 +720,14 @@ harbor k6 restart
 ```
 
 The restart command will:
+
 - Stop the current k6 container
 - Query Hetzner API for current data plane IPs (ensures accurate targets)
 - Recreate k6 container with updated settings from harbor.yaml
 - Start load testing with new configuration
 
 Example output:
+
 ```
 [info] Restarting k6 load testing container...
 [info] Control plane: harbor-control (X.X.X.X)
@@ -728,9 +736,6 @@ Example output:
 [info] Starting k6 with updated configuration...
 [info]   Rate: 100 req/s | VUs: 20-500 | Duration: 1h | Path: /api/health
 [info] ✓ k6 successfully restarted with latest configuration
-
-To view k6 logs:
-  ssh root@X.X.X.X "docker logs k6 --tail 100 -f"
 ```
 
 ### Stopping k6
@@ -742,11 +747,13 @@ harbor k6 stop
 ```
 
 This will:
+
 - Stop and remove the k6 container
 - Keep k6 configuration in harbor.yaml
 - Allow you to restart later with `harbor k6 restart`
 
 Example output:
+
 ```
 [info] Stopping k6 load testing container...
 [info] Control plane: harbor-control (X.X.X.X)
@@ -766,6 +773,7 @@ k6:
 ```
 
 Then redeploy:
+
 ```bash
 harbor redeploy
 ```

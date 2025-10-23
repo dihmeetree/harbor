@@ -375,39 +375,9 @@ func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *mod
 		k6LBTargets = strings.Join(targets, ",")
 	}
 
-	// Set k6 defaults if not configured
-	k6PreallocatedVUs := d.config.K6.PreallocatedVUs
-	if k6PreallocatedVUs == 0 {
-		k6PreallocatedVUs = 10
-	}
-	k6MaxVUs := d.config.K6.MaxVUs
-	if k6MaxVUs == 0 {
-		k6MaxVUs = 100
-	}
-	k6Rate := d.config.K6.Rate
-	if k6Rate == 0 {
-		k6Rate = 10
-	}
-	k6Duration := d.config.K6.Duration
-	if k6Duration == "" {
-		k6Duration = "30s"
-	}
-	k6TargetPath := d.config.K6.TargetPath
-	if k6TargetPath == "" {
-		k6TargetPath = "/"
-	}
-	k6ConnectionTimeout := d.config.K6.ConnectionTimeout
-	if k6ConnectionTimeout == "" {
-		k6ConnectionTimeout = "10s"
-	}
-	k6RequestTimeout := d.config.K6.RequestTimeout
-	if k6RequestTimeout == "" {
-		k6RequestTimeout = "30s"
-	}
-	k6GracefulStop := d.config.K6.GracefulStop
-	if k6GracefulStop == "" {
-		k6GracefulStop = "30s"
-	}
+	// Apply k6 defaults
+	k6Config := d.config.K6
+	ApplyK6Defaults(&k6Config)
 
 	// Prepare template data
 	data := TemplateData{
@@ -418,14 +388,14 @@ func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *mod
 		AutoscalerEnabled:   d.config.Autoscaler.Enabled,
 		HetznerToken:        os.Getenv("HETZNER_API_TOKEN"),
 		K6Enabled:           d.config.K6.Enabled,
-		K6PreallocatedVUs:   k6PreallocatedVUs,
-		K6MaxVUs:            k6MaxVUs,
-		K6Rate:              k6Rate,
-		K6Duration:          k6Duration,
-		K6TargetPath:        k6TargetPath,
-		K6ConnectionTimeout: k6ConnectionTimeout,
-		K6RequestTimeout:    k6RequestTimeout,
-		K6GracefulStop:      k6GracefulStop,
+		K6PreallocatedVUs:   k6Config.PreallocatedVUs,
+		K6MaxVUs:            k6Config.MaxVUs,
+		K6Rate:              k6Config.Rate,
+		K6Duration:          k6Config.Duration,
+		K6TargetPath:        k6Config.TargetPath,
+		K6ConnectionTimeout: k6Config.ConnectionTimeout,
+		K6RequestTimeout:    k6Config.RequestTimeout,
+		K6GracefulStop:      k6Config.GracefulStop,
 		K6LBTargets:         k6LBTargets,
 	}
 
@@ -910,51 +880,14 @@ func (d *Deployer) RestartK6(ctx context.Context) error {
 		return fmt.Errorf("failed to remove k6 container: %w", err)
 	}
 
-	// Set defaults for k6 config
-	rate := d.config.K6.Rate
-	if rate == 0 {
-		rate = 10
-	}
-
-	duration := d.config.K6.Duration
-	if duration == "" {
-		duration = "30s"
-	}
-
-	preallocatedVUs := d.config.K6.PreallocatedVUs
-	if preallocatedVUs == 0 {
-		preallocatedVUs = 10
-	}
-
-	maxVUs := d.config.K6.MaxVUs
-	if maxVUs == 0 {
-		maxVUs = 100
-	}
-
-	targetPath := d.config.K6.TargetPath
-	if targetPath == "" {
-		targetPath = "/"
-	}
-
-	connectionTimeout := d.config.K6.ConnectionTimeout
-	if connectionTimeout == "" {
-		connectionTimeout = "10s"
-	}
-
-	requestTimeout := d.config.K6.RequestTimeout
-	if requestTimeout == "" {
-		requestTimeout = "30s"
-	}
-
-	gracefulStop := d.config.K6.GracefulStop
-	if gracefulStop == "" {
-		gracefulStop = "30s"
-	}
+	// Apply defaults for k6 config
+	k6Config := d.config.K6
+	ApplyK6Defaults(&k6Config)
 
 	// Run k6 with updated configuration
 	fmt.Println("[info] Starting k6 with updated configuration...")
 	fmt.Printf("[info]   Rate: %d req/s | VUs: %d-%d | Duration: %s | Path: %s\n",
-		rate, preallocatedVUs, maxVUs, duration, targetPath)
+		k6Config.Rate, k6Config.PreallocatedVUs, k6Config.MaxVUs, k6Config.Duration, k6Config.TargetPath)
 
 	runCmd := fmt.Sprintf(`docker run -d --name k6 \
 		--network %s \
@@ -972,14 +905,14 @@ func (d *Deployer) RestartK6(ctx context.Context) error {
 		grafana/k6:latest run /scripts/loadtest.js`,
 		networkName,
 		lbTargets,
-		rate,
-		duration,
-		preallocatedVUs,
-		maxVUs,
-		targetPath,
-		connectionTimeout,
-		requestTimeout,
-		gracefulStop)
+		k6Config.Rate,
+		k6Config.Duration,
+		k6Config.PreallocatedVUs,
+		k6Config.MaxVUs,
+		k6Config.TargetPath,
+		k6Config.ConnectionTimeout,
+		k6Config.RequestTimeout,
+		k6Config.GracefulStop)
 
 	output, err := sshClient.Execute(runCmd)
 	if err != nil {
@@ -1230,17 +1163,7 @@ func (d *Deployer) getServersFromHetzner(ctx context.Context, token string) (con
 		return nil, nil, nil, fmt.Errorf("failed to get control planes: %w", err)
 	}
 
-	for _, srv := range controlHetzner {
-		var privateIP string
-		if len(srv.PrivateNet) > 0 {
-			privateIP = srv.PrivateNet[0].IP.String()
-		}
-		controlPlanes = append(controlPlanes, &models.Server{
-			Name:      srv.Name,
-			PublicIP:  srv.PublicNet.IPv4.IP.String(),
-			PrivateIP: privateIP,
-		})
-	}
+	controlPlanes = HcloudListToModels(controlHetzner)
 
 	// Get data plane (load balancer) servers
 	lbHetzner, err := client.Server.AllWithOpts(ctx, hcloud.ServerListOpts{
@@ -1252,17 +1175,7 @@ func (d *Deployer) getServersFromHetzner(ctx context.Context, token string) (con
 		return nil, nil, nil, fmt.Errorf("failed to get data planes: %w", err)
 	}
 
-	for _, srv := range lbHetzner {
-		var privateIP string
-		if len(srv.PrivateNet) > 0 {
-			privateIP = srv.PrivateNet[0].IP.String()
-		}
-		dataPlanes = append(dataPlanes, &models.Server{
-			Name:      srv.Name,
-			PublicIP:  srv.PublicNet.IPv4.IP.String(),
-			PrivateIP: privateIP,
-		})
-	}
+	dataPlanes = HcloudListToModels(lbHetzner)
 
 	// Get app servers
 	appHetzner, err := client.Server.AllWithOpts(ctx, hcloud.ServerListOpts{
@@ -1274,17 +1187,7 @@ func (d *Deployer) getServersFromHetzner(ctx context.Context, token string) (con
 		return nil, nil, nil, fmt.Errorf("failed to get app servers: %w", err)
 	}
 
-	for _, srv := range appHetzner {
-		var privateIP string
-		if len(srv.PrivateNet) > 0 {
-			privateIP = srv.PrivateNet[0].IP.String()
-		}
-		appServers = append(appServers, &models.Server{
-			Name:      srv.Name,
-			PublicIP:  srv.PublicNet.IPv4.IP.String(),
-			PrivateIP: privateIP,
-		})
-	}
+	appServers = HcloudListToModels(appHetzner)
 
 	return controlPlanes, dataPlanes, appServers, nil
 }

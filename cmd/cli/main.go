@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/dihmeetree/harbor/internal/cli"
 	"github.com/dihmeetree/harbor/internal/config"
 	"github.com/dihmeetree/harbor/internal/database"
 	"github.com/dihmeetree/harbor/internal/hetzner"
@@ -118,33 +119,15 @@ func deployCmd() *cobra.Command {
 		Short: "Deploy infrastructure",
 		Long:  "Provisions all infrastructure components defined in the configuration",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Load config
-			cfg, err := config.Load(cfgFile)
+			// Initialize command context
+			cmdCtx, err := cli.InitCommandContext(cfgFile, dbPath)
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
-
-			// Get Hetzner API token
-			token := os.Getenv("HETZNER_API_TOKEN")
-			if token == "" {
-				return fmt.Errorf("HETZNER_API_TOKEN environment variable is required")
-			}
-
-			// Ensure database directory exists
-			dbDir := filepath.Dir(dbPath)
-			if err := os.MkdirAll(dbDir, 0755); err != nil {
-				return fmt.Errorf("failed to create database directory: %w", err)
-			}
-
-			// Open database
-			db, err := database.New(dbPath)
-			if err != nil {
-				return fmt.Errorf("failed to open database: %w", err)
-			}
-			defer db.Close()
+			defer cmdCtx.Close()
 
 			// Create provisioner
-			provisioner := orchestrator.NewProvisioner(cfg, token, db)
+			provisioner := orchestrator.NewProvisioner(cmdCtx.Config, cmdCtx.Token, cmdCtx.DB)
 
 			// Provision infrastructure
 			ctx := context.Background()
@@ -189,13 +172,9 @@ func redeployCmd() *cobra.Command {
 			}
 
 			// Get SSH key path
-			privateKeyPath := os.Getenv("HARBOR_SSH_KEY")
-			if privateKeyPath == "" {
-				// Try default location in project directory
-				privateKeyPath = filepath.Join(".harbor", "ssh", cfg.Server.Name+"-key")
-				if _, err := os.Stat(privateKeyPath); err != nil {
-					return fmt.Errorf("SSH key not found. Expected at: %s\nSet HARBOR_SSH_KEY environment variable or run 'harbor deploy' first", privateKeyPath)
-				}
+			privateKeyPath, err := cli.ResolveSshKeyPath(cfg)
+			if err != nil {
+				return err
 			}
 
 			deployer := orchestrator.NewDeployer(cfg, db, privateKeyPath)
@@ -218,9 +197,9 @@ func statusCmd() *cobra.Command {
 		Short: "Show infrastructure status",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Get Hetzner API token
-			token := os.Getenv("HETZNER_API_TOKEN")
-			if token == "" {
-				return fmt.Errorf("HETZNER_API_TOKEN environment variable is required")
+			token, err := cli.RequireEnvVar("HETZNER_API_TOKEN")
+			if err != nil {
+				return err
 			}
 
 			// Create Hetzner client
@@ -334,27 +313,15 @@ func destroyCmd() *cobra.Command {
 				}
 			}
 
-			// Load config
-			cfg, err := config.Load(cfgFile)
+			// Initialize command context
+			cmdCtx, err := cli.InitCommandContext(cfgFile, dbPath)
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
-
-			// Get Hetzner API token
-			token := os.Getenv("HETZNER_API_TOKEN")
-			if token == "" {
-				return fmt.Errorf("HETZNER_API_TOKEN environment variable is required")
-			}
-
-			// Open database
-			db, err := database.New(dbPath)
-			if err != nil {
-				return fmt.Errorf("failed to open database: %w", err)
-			}
-			defer db.Close()
+			defer cmdCtx.Close()
 
 			// Create provisioner
-			provisioner := orchestrator.NewProvisioner(cfg, token, db)
+			provisioner := orchestrator.NewProvisioner(cmdCtx.Config, cmdCtx.Token, cmdCtx.DB)
 
 			// Destroy infrastructure
 			ctx := context.Background()
@@ -433,9 +400,9 @@ func scaleServers(role, poolName string, targetReplicas int) error {
 	}
 
 	// Get Hetzner API token
-	token := os.Getenv("HETZNER_API_TOKEN")
-	if token == "" {
-		return fmt.Errorf("HETZNER_API_TOKEN environment variable is required")
+	token, err := cli.RequireEnvVar("HETZNER_API_TOKEN")
+	if err != nil {
+		return err
 	}
 
 	// Open database
@@ -446,17 +413,9 @@ func scaleServers(role, poolName string, targetReplicas int) error {
 	defer db.Close()
 
 	// Get SSH key path
-	sshKeyPath := os.Getenv("SSH_PRIVATE_KEY_PATH")
-	if sshKeyPath == "" {
-		// Use the actual server name from config for the key
-		keyName := fmt.Sprintf("%s-key", cfg.Server.Name)
-		// Check current directory first
-		sshKeyPath = filepath.Join(".harbor", "ssh", keyName)
-		if _, err := os.Stat(sshKeyPath); os.IsNotExist(err) {
-			// Fall back to home directory
-			homeDir, _ := os.UserHomeDir()
-			sshKeyPath = filepath.Join(homeDir, ".harbor", "ssh", keyName)
-		}
+	sshKeyPath, err := cli.ResolveSshKeyPath(cfg)
+	if err != nil {
+		return err
 	}
 
 	// Get control plane IP for SSH connection
@@ -568,19 +527,15 @@ This will stop the current k6 container and recreate it with updated settings in
 			controlPlane := controlPlanes[0]
 
 			// Check API token
-			apiToken := os.Getenv("HETZNER_API_TOKEN")
-			if apiToken == "" {
-				return fmt.Errorf("HETZNER_API_TOKEN environment variable not set")
+			_, err = cli.RequireEnvVar("HETZNER_API_TOKEN")
+			if err != nil {
+				return err
 			}
 
 			// Get SSH key path
-			privateKeyPath := os.Getenv("HARBOR_SSH_KEY")
-			if privateKeyPath == "" {
-				// Try default location in project directory
-				privateKeyPath = filepath.Join(".harbor", "ssh", cfg.Server.Name+"-key")
-				if _, err := os.Stat(privateKeyPath); err != nil {
-					return fmt.Errorf("SSH key not found. Expected at: %s\nSet HARBOR_SSH_KEY environment variable or run 'harbor deploy' first", privateKeyPath)
-				}
+			privateKeyPath, err := cli.ResolveSshKeyPath(cfg)
+			if err != nil {
+				return err
 			}
 
 			// Initialize deployer
@@ -638,13 +593,9 @@ Use 'harbor k6 restart' to start it again later.`,
 			controlPlane := controlPlanes[0]
 
 			// Get SSH key path
-			privateKeyPath := os.Getenv("HARBOR_SSH_KEY")
-			if privateKeyPath == "" {
-				// Try default location in project directory
-				privateKeyPath = filepath.Join(".harbor", "ssh", cfg.Server.Name+"-key")
-				if _, err := os.Stat(privateKeyPath); err != nil {
-					return fmt.Errorf("SSH key not found. Expected at: %s\nSet HARBOR_SSH_KEY environment variable or run 'harbor deploy' first", privateKeyPath)
-				}
+			privateKeyPath, err := cli.ResolveSshKeyPath(cfg)
+			if err != nil {
+				return err
 			}
 
 			// Initialize deployer

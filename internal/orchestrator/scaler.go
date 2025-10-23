@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/dihmeetree/harbor/internal/apisix"
 	"github.com/dihmeetree/harbor/internal/config"
@@ -218,18 +217,7 @@ func (m *ManualScaler) ScaleUp(ctx context.Context, role string, poolName string
 		}
 
 		// Convert to models.Server format for UpdateAPISIXUpstreams
-		var allAppServers []*models.Server
-		for _, hs := range hetznerServers {
-			privateIP := ""
-			if len(hs.PrivateNet) > 0 {
-				privateIP = hs.PrivateNet[0].IP.String()
-			}
-			allAppServers = append(allAppServers, &models.Server{
-				Name:      hs.Name,
-				PrivateIP: privateIP,
-				PublicIP:  hs.PublicNet.IPv4.IP.String(),
-			})
-		}
+		allAppServers := HcloudListToModels(hetznerServers)
 
 		if err := m.deployer.UpdateAPISIXUpstreams(0, controlPlanes[0], allAppServers); err != nil {
 			return fmt.Errorf("failed to update APISIX upstreams: %w", err)
@@ -251,31 +239,8 @@ func (m *ManualScaler) ScaleUp(ctx context.Context, role string, poolName string
 	}
 
 	// Convert to models.Server format
-	var dataPlanes []*models.Server
-	for _, hs := range allDataPlanes {
-		privateIP := ""
-		if len(hs.PrivateNet) > 0 {
-			privateIP = hs.PrivateNet[0].IP.String()
-		}
-		dataPlanes = append(dataPlanes, &models.Server{
-			Name:      hs.Name,
-			PrivateIP: privateIP,
-			PublicIP:  hs.PublicNet.IPv4.IP.String(),
-		})
-	}
-
-	var appServers []*models.Server
-	for _, hs := range allAppServers {
-		privateIP := ""
-		if len(hs.PrivateNet) > 0 {
-			privateIP = hs.PrivateNet[0].IP.String()
-		}
-		appServers = append(appServers, &models.Server{
-			Name:      hs.Name,
-			PrivateIP: privateIP,
-			PublicIP:  hs.PublicNet.IPv4.IP.String(),
-		})
-	}
+	dataPlanes := HcloudListToModels(allDataPlanes)
+	appServers := HcloudListToModels(allAppServers)
 
 	if err := m.deployer.UpdatePrometheusConfig(0, controlPlanes[0], dataPlanes, appServers); err != nil {
 		return fmt.Errorf("failed to update Prometheus configuration: %w", err)
@@ -296,97 +261,9 @@ func (m *ManualScaler) ScaleUp(ctx context.Context, role string, poolName string
 	return nil
 }
 
-// createServerViaHetzner creates a server using the hetzner client (same pattern as provisioner)
+// createServerViaHetzner creates a server using the hetzner client
 func (m *ManualScaler) createServerViaHetzner(ctx context.Context, cfg config.ServerConfig, role models.ServerRole, network *hcloud.Network, firewall *hcloud.Firewall, sshKey *hcloud.SSHKey) (*hcloud.Server, error) {
-	// Get server type
-	serverType, err := m.hetznerClient.GetServerType(ctx, cfg.Type)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get image
-	image, err := m.hetznerClient.GetImage(ctx, cfg.Image)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get location
-	location, err := m.hetznerClient.GetLocation(ctx, cfg.Location)
-	if err != nil {
-		return nil, err
-	}
-
-	// Determine role label
-	var roleLabel string
-	switch role {
-	case models.RoleDataPlane:
-		roleLabel = "lb"
-	case models.RoleApp:
-		roleLabel = "app"
-	default:
-		roleLabel = string(role)
-	}
-
-	// Create server
-	opts := hcloud.ServerCreateOpts{
-		Name:       cfg.Name,
-		ServerType: serverType,
-		Image:      image,
-		Location:   location,
-		SSHKeys:    []*hcloud.SSHKey{sshKey},
-		Networks:   []*hcloud.Network{network},
-		Firewalls:  []*hcloud.ServerCreateFirewall{{Firewall: *firewall}},
-		Labels: map[string]string{
-			"role":      roleLabel,
-			"managed":   "harbor",
-			"autoscale": "false", // Manually created servers
-		},
-	}
-
-	server, err := m.hetznerClient.CreateServer(ctx, opts)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get private IP
-	var privateIP string
-	for _, privateNet := range server.PrivateNet {
-		if privateNet.Network.ID == network.ID {
-			privateIP = privateNet.IP.String()
-			break
-		}
-	}
-
-	// Get database network ID
-	netRepo := database.NewNetworkRepository(m.db)
-	dbNetwork, err := netRepo.GetByHetznerID(network.ID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get network from database: %w", err)
-	}
-	if dbNetwork == nil {
-		return nil, fmt.Errorf("network not found in database")
-	}
-
-	// Save to database
-	serverRepo := database.NewServerRepository(m.db)
-	dbServer := &models.Server{
-		HetznerID: server.ID,
-		Name:      server.Name,
-		Type:      cfg.Type,
-		Role:      role,
-		PublicIP:  server.PublicNet.IPv4.IP.String(),
-		PrivateIP: privateIP,
-		Location:  cfg.Location,
-		Image:     cfg.Image,
-		Status:    string(server.Status),
-		NetworkID: dbNetwork.ID,
-		CreatedAt: time.Now(),
-	}
-	if err := serverRepo.Create(dbServer); err != nil {
-		return nil, err
-	}
-
-	return server, nil
+	return CreateServerWithDatabase(ctx, m.hetznerClient, m.db, cfg, role, network, firewall, sshKey)
 }
 
 // ScaleDown removes the specified number of servers
@@ -458,18 +335,7 @@ func (m *ManualScaler) ScaleDown(ctx context.Context, role string, poolName stri
 		}
 
 		// Convert to models.Server format for UpdateAPISIXUpstreams
-		var remainingAppServers []*models.Server
-		for _, hs := range hetznerServers {
-			privateIP := ""
-			if len(hs.PrivateNet) > 0 {
-				privateIP = hs.PrivateNet[0].IP.String()
-			}
-			remainingAppServers = append(remainingAppServers, &models.Server{
-				Name:      hs.Name,
-				PrivateIP: privateIP,
-				PublicIP:  hs.PublicNet.IPv4.IP.String(),
-			})
-		}
+		remainingAppServers := HcloudListToModels(hetznerServers)
 
 		if err := m.deployer.UpdateAPISIXUpstreams(0, controlPlanes[0], remainingAppServers); err != nil {
 			return fmt.Errorf("failed to update APISIX upstreams: %w", err)
@@ -491,31 +357,8 @@ func (m *ManualScaler) ScaleDown(ctx context.Context, role string, poolName stri
 	}
 
 	// Convert to models.Server format
-	var dataPlanes []*models.Server
-	for _, hs := range allDataPlanes {
-		privateIP := ""
-		if len(hs.PrivateNet) > 0 {
-			privateIP = hs.PrivateNet[0].IP.String()
-		}
-		dataPlanes = append(dataPlanes, &models.Server{
-			Name:      hs.Name,
-			PrivateIP: privateIP,
-			PublicIP:  hs.PublicNet.IPv4.IP.String(),
-		})
-	}
-
-	var appServers []*models.Server
-	for _, hs := range allAppServers {
-		privateIP := ""
-		if len(hs.PrivateNet) > 0 {
-			privateIP = hs.PrivateNet[0].IP.String()
-		}
-		appServers = append(appServers, &models.Server{
-			Name:      hs.Name,
-			PrivateIP: privateIP,
-			PublicIP:  hs.PublicNet.IPv4.IP.String(),
-		})
-	}
+	dataPlanes := HcloudListToModels(allDataPlanes)
+	appServers := HcloudListToModels(allAppServers)
 
 	if err := m.deployer.UpdatePrometheusConfig(0, controlPlanes[0], dataPlanes, appServers); err != nil {
 		return fmt.Errorf("failed to update Prometheus configuration: %w", err)
@@ -561,39 +404,9 @@ func (m *ManualScaler) updateK6Targets(ctx context.Context, dataPlanes []*models
 		return fmt.Errorf("failed to remove k6 container: %w", err)
 	}
 
-	// Set defaults for k6 config
-	rate := m.config.K6.Rate
-	if rate == 0 {
-		rate = 10
-	}
-	duration := m.config.K6.Duration
-	if duration == "" {
-		duration = "30s"
-	}
-	preallocatedVUs := m.config.K6.PreallocatedVUs
-	if preallocatedVUs == 0 {
-		preallocatedVUs = 10
-	}
-	maxVUs := m.config.K6.MaxVUs
-	if maxVUs == 0 {
-		maxVUs = 100
-	}
-	targetPath := m.config.K6.TargetPath
-	if targetPath == "" {
-		targetPath = "/"
-	}
-	connectionTimeout := m.config.K6.ConnectionTimeout
-	if connectionTimeout == "" {
-		connectionTimeout = "10s"
-	}
-	requestTimeout := m.config.K6.RequestTimeout
-	if requestTimeout == "" {
-		requestTimeout = "30s"
-	}
-	gracefulStop := m.config.K6.GracefulStop
-	if gracefulStop == "" {
-		gracefulStop = "30s"
-	}
+	// Apply defaults for k6 config
+	k6Config := m.config.K6
+	ApplyK6Defaults(&k6Config)
 
 	// Run k6 with updated targets
 	runCmd := fmt.Sprintf(`docker run -d --name k6 \
@@ -612,14 +425,14 @@ func (m *ManualScaler) updateK6Targets(ctx context.Context, dataPlanes []*models
 		grafana/k6:latest run /scripts/loadtest.js`,
 		networkName,
 		lbTargets,
-		rate,
-		duration,
-		preallocatedVUs,
-		maxVUs,
-		targetPath,
-		connectionTimeout,
-		requestTimeout,
-		gracefulStop)
+		k6Config.Rate,
+		k6Config.Duration,
+		k6Config.PreallocatedVUs,
+		k6Config.MaxVUs,
+		k6Config.TargetPath,
+		k6Config.ConnectionTimeout,
+		k6Config.RequestTimeout,
+		k6Config.GracefulStop)
 
 	output, err := m.sshClient.Execute(runCmd)
 	if err != nil {
