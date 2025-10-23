@@ -595,8 +595,6 @@ This will stop the current k6 container and recreate it with updated settings in
 			}
 
 			fmt.Println("[info] ✓ k6 successfully restarted with latest configuration")
-			fmt.Println("\nTo view k6 logs:")
-			fmt.Printf("  ssh root@%s \"docker logs k6 --tail 100 -f\"\n", controlPlane.PublicIP)
 
 			return nil
 		},
@@ -661,8 +659,6 @@ Use 'harbor k6 restart' to start it again later.`,
 			}
 
 			fmt.Println("[info] ✓ k6 load testing stopped")
-			fmt.Println("\nTo restart k6 with current configuration:")
-			fmt.Println("  harbor k6 restart")
 
 			return nil
 		},
