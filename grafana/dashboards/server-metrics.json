@@ -353,11 +353,11 @@
           },
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "100 * (1 - (\n  (\n    (node_memory_MemAvailable_bytes{job=\"node-exporter\"} or \n    (node_memory_MemFree_bytes{job=\"node-exporter\"} + \n    node_memory_Cached_bytes{job=\"node-exporter\"} + \n    node_memory_Buffers_bytes{job=\"node-exporter\"}))\n  ) / node_memory_MemTotal_bytes{job=\"node-exporter\"}\n))\n",
+          "expr": "100 * (1 - (\n  (\n    (avg by(server) (node_memory_MemAvailable_bytes{job=\"node-exporter\"}) or \n    (avg by(server) (node_memory_MemFree_bytes{job=\"node-exporter\"}) + \n    avg by(server) (node_memory_Cached_bytes{job=\"node-exporter\"}) + \n    avg by(server) (node_memory_Buffers_bytes{job=\"node-exporter\"})))\n  ) / avg by(server) (node_memory_MemTotal_bytes{job=\"node-exporter\"})\n))\n",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "instant": false,
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{server}}",
           "range": true,
           "refId": "A",
           "useBackend": false
