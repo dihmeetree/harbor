@@ -107,7 +107,7 @@
           "datasource": {
             "uid": "$datasourceProm"
           },
-          "expr": "increase(apisix_http_requests_total{instance=~\"$instance\"}[$__range])",
+          "expr": "sum(increase(apisix_http_requests_total{instance=~\"$instance\"}[$__range]))",
           "intervalFactor": 2,
           "legendFormat": "Total",
           "refId": "A"
@@ -187,7 +187,7 @@
           "datasource": {
             "uid": "$datasourceProm"
           },
-          "expr": "increase(apisix_nginx_http_current_connections{state=\"accepted\", instance=~\"$instance\"}[$__range])",
+          "expr": "sum(increase(apisix_nginx_http_current_connections{state=\"accepted\", instance=~\"$instance\"}[$__range]))",
           "intervalFactor": 2,
           "legendFormat": "Accepted",
           "refId": "A"
@@ -267,7 +267,7 @@
           "datasource": {
             "uid": "$datasourceProm"
           },
-          "expr": "increase(apisix_nginx_http_current_connections{state=\"handled\", instance=~\"$instance\"}[$__range])",
+          "expr": "sum(increase(apisix_nginx_http_current_connections{state=\"handled\", instance=~\"$instance\"}[$__range]))",
           "intervalFactor": 2,
           "legendFormat": "Total",
           "refId": "A"
@@ -1941,7 +1941,11 @@
   "preload": false,
   "refresh": "10s",
   "schemaVersion": 40,
-  "tags": ["apisix", "api-gateway", "performance"],
+  "tags": [
+    "apisix",
+    "api-gateway",
+    "performance"
+  ],
   "templating": {
     "list": [
       {
