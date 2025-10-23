@@ -115,7 +115,7 @@ harbor status
 
 ```bash
 # Get data plane IP from status output
-curl http://<data-plane-ip>/
+curl http://<data-plane-ip>
 ```
 
 7. **Clean up** (when done):
