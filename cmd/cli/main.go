@@ -101,7 +101,7 @@ func validateCmd() *cobra.Command {
 
 			fmt.Printf("✓ Configuration is valid\n")
 			fmt.Printf("  Provider: %s\n", cfg.Provider)
-			fmt.Printf("  Control plane: %s (%s)\n", cfg.Server.Name, cfg.Server.Type)
+			fmt.Printf("  Control plane: %s (%s)\n", cfg.Control.Name, cfg.Control.Type)
 			if cfg.LoadBalancer.Enabled {
 				fmt.Printf("  Data planes: %d x %s\n", cfg.LoadBalancer.Replicas, cfg.LoadBalancer.ServerType)
 			}
@@ -135,7 +135,7 @@ func deployCmd() *cobra.Command {
 				return fmt.Errorf("provisioning failed: %w", err)
 			}
 
-			fmt.Println("\n✓ Deployment completed successfully!")
+			fmt.Println("[info] ✓ Deployment completed successfully!")
 			return nil
 		},
 	}

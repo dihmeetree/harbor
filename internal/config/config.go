@@ -10,7 +10,8 @@ import (
 // Config represents the main configuration structure
 type Config struct {
 	Provider     string           `yaml:"provider"`
-	Server       ServerConfig     `yaml:"server"`
+	SnapshotID   int64            `yaml:"snapshot_id"` // Hetzner snapshot ID for Flatcar Linux (applies to all servers)
+	Control      ServerConfig     `yaml:"control"`
 	Network      NetworkConfig    `yaml:"network"`
 	Firewall     FirewallConfig   `yaml:"firewall"`
 	Container    ContainerConfig  `yaml:"container"`
@@ -27,7 +28,6 @@ type ServerConfig struct {
 	Name     string `yaml:"name"`
 	Type     string `yaml:"type"`
 	Location string `yaml:"location"`
-	Image    string `yaml:"image"`
 }
 
 // NetworkConfig represents network configuration
@@ -64,7 +64,6 @@ type PoolConfig struct {
 	Replicas    int    `yaml:"replicas"`
 	ServerType  string `yaml:"server_type"`
 	Location    string `yaml:"location"`
-	Image       string `yaml:"image"`
 	ServiceName string `yaml:"service_name"`
 }
 
@@ -178,8 +177,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid provider: %s (must be 'hetzner' or 'digitalocean')", c.Provider)
 	}
 
-	if c.Server.Name == "" {
-		return fmt.Errorf("server name is required")
+	if c.Control.Name == "" {
+		return fmt.Errorf("control plane name is required")
 	}
 
 	if c.Network.Name == "" {

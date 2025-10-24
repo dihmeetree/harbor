@@ -2,7 +2,7 @@
   <img src="https://i.imgur.com/ZpzW1ma.png" alt="Harbor" width="850">
 </p>
 
-Harbor is a CLI tool for provisioning and managing APISIX-based infrastructure on Hetzner Cloud. It automates the deployment of a complete API gateway, load balancing, and observability stack with a single command.
+Harbor is a CLI tool for provisioning and managing APISIX-based infrastructure on Hetzner Cloud using Flatcar Container Linux. It automates the deployment of a complete API gateway, load balancing, and observability stack with a single command.
 
 ## Features
 
@@ -51,6 +51,7 @@ All servers communicate over a private Hetzner network for security and performa
 
 - Go 1.21 or later
 - Hetzner Cloud API token
+- Flatcar Linux snapshot (built with `flatcar/flatcar.pkr.hcl`)
 - 15-30 minutes for initial deployment
 
 ### Installation
@@ -69,24 +70,36 @@ sudo mv harbor /usr/local/bin/
 
 ### Deploy Your First Stack
 
-1. **Initialize configuration**:
+1. **Build Flatcar snapshot** (one-time setup):
+
+```bash
+cd flatcar
+export HCLOUD_TOKEN="your-hetzner-api-token"
+packer build flatcar.pkr.hcl
+# Note the snapshot ID from the output
+```
+
+2. **Initialize configuration**:
 
 ```bash
 harbor init
 ```
 
-2. **Edit `harbor.yaml`** with your settings (see `configs/harbor.example.yaml` for full options)
+3. **Edit `harbor.yaml`** with your snapshot ID and settings:
 
-3. **Set your Hetzner API token**:
+```yaml
+provider: hetzner
+snapshot_id: 327228288  # Use your snapshot ID from step 1
+# ... rest of configuration
+```
+
+4. **Set your Hetzner API token**:
 
 ```bash
 export HETZNER_API_TOKEN="your-hetzner-api-token"
-
-# Optional: Use your own SSH key
-export SSH_PRIVATE_KEY_PATH="~/.ssh/id_rsa"
 ```
 
-4. **Deploy infrastructure**:
+5. **Deploy infrastructure**:
 
 ```bash
 harbor deploy
@@ -95,9 +108,9 @@ harbor deploy
 This will:
 
 - ✅ Create private network and firewall
-- ✅ Provision servers (control plane, data planes, app servers)
+- ✅ Provision Flatcar Linux servers (control plane, data planes, app servers)
 - ✅ Generate or use SSH keys
-- ✅ Install Docker on all servers
+- ✅ Verify Docker and docker-compose on all servers
 - ✅ Deploy APISIX control plane, etcd, and Prometheus
 - ✅ Deploy APISIX data planes
 - ✅ Deploy your application
@@ -105,20 +118,20 @@ This will:
 
 **Total time: 15-30 minutes**
 
-5. **Check status**:
+6. **Check status**:
 
 ```bash
 harbor status
 ```
 
-6. **Test your deployment**:
+7. **Test your deployment**:
 
 ```bash
 # Get data plane IP from status output
 curl http://<data-plane-ip>
 ```
 
-7. **Clean up** (when done):
+8. **Clean up** (when done):
 
 ```bash
 harbor destroy
@@ -130,12 +143,12 @@ harbor destroy
 
 ```yaml
 provider: hetzner
+snapshot_id: 327228288  # Your Flatcar snapshot ID
 
-server:
-  name: "my-app"
-  type: "ccx13"
+control:
+  name: "my-app-control"
+  type: "ccx33"
   location: "ash"
-  image: "ubuntu-24.04"
 
 network:
   name: "my-network"
@@ -151,10 +164,10 @@ firewall:
       source_ips: ["current"] # Auto-replaced with your IP
       description: "SSH access"
     - direction: "in"
-      port: "80"
+      port: "443"
       protocol: "tcp"
       source_ips: ["0.0.0.0/0", "::/0"]
-      description: "HTTP from anywhere"
+      description: "HTTPS from anywhere"
 
 container:
   name: "app"
@@ -165,7 +178,6 @@ loadbalancer:
   replicas: 1
   server_type: "ccx13"
   location: "ash"
-  image: "ubuntu-24.04"
   service_name: "apisix-data-plane"
 
 app:
@@ -173,7 +185,6 @@ app:
   replicas: 1
   server_type: "ccx13"
   location: "ash"
-  image: "ubuntu-24.04"
   service_name: "app"
 
 apisix:
@@ -443,28 +454,31 @@ harbor status
 # Wait for servers to boot (they need 1-2 minutes)
 sleep 120
 
-# Try manual SSH
-ssh -i .harbor/ssh/<project-name>-key root@<server-ip>
+# Try manual SSH (Flatcar uses 'core' user)
+ssh -i .harbor/ssh/<project-name>-key core@<server-ip>
 ```
 
-### Docker Installation Failed
+### Docker or docker-compose Not Available
 
 ```bash
 # SSH to server
-ssh -i .harbor/ssh/<project-name>-key root@<server-ip>
+ssh -i .harbor/ssh/<project-name>-key core@<server-ip>
 
 # Check Docker status
 systemctl status docker
 
-# View installation logs
-journalctl -u docker
+# Check docker-compose is loaded via sysext
+docker-compose version
+
+# Verify sysext is active
+systemctl status systemd-sysext
 ```
 
 ### APISIX Not Starting
 
 ```bash
-# SSH to control plane
-ssh root@<control-plane-ip>
+# SSH to control plane (Flatcar uses 'core' user)
+ssh -i .harbor/ssh/<project-name>-key core@<control-plane-ip>
 
 # Check running containers
 docker ps -a
@@ -474,7 +488,7 @@ docker logs apisix-control-plane
 docker logs etcd
 
 # Check configuration
-cat /opt/harbor/apisix-control.yaml
+cat /var/lib/harbor/apisix-control.yaml
 ```
 
 ### Routes Not Working
@@ -489,7 +503,7 @@ curl -H "X-API-KEY: your-api-key" \
   http://<control-plane-ip>:9180/apisix/admin/upstreams
 
 # Check data plane logs
-ssh root@<data-plane-ip>
+ssh -i .harbor/ssh/<project-name>-key core@<data-plane-ip>
 docker logs apisix-data-plane
 ```
 
@@ -543,7 +557,7 @@ Check autoscaler logs:
 harbor status
 
 # View autoscaler logs
-ssh root@<control-plane-ip> "docker logs autoscaler --tail 100"
+ssh -i .harbor/ssh/<project-name>-key core@<control-plane-ip> "docker logs autoscaler --tail 100"
 ```
 
 Example output:

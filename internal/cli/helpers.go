@@ -78,7 +78,7 @@ func ResolveSshKeyPath(cfg *config.Config) (string, error) {
 	}
 
 	// Try default location in project directory
-	keyName := fmt.Sprintf("%s-key", cfg.Server.Name)
+	keyName := fmt.Sprintf("%s-key", cfg.Control.Name)
 	privateKeyPath = filepath.Join(".harbor", "ssh", keyName)
 	if _, err := os.Stat(privateKeyPath); err == nil {
 		return privateKeyPath, nil

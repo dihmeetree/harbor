@@ -25,6 +25,7 @@ type Deployer struct {
 	deployRepo     *database.DeploymentRepository
 	dockerClient   *docker.Installer
 	privateKeyPath string
+	sshUser        string // SSH username for connecting to servers
 }
 
 // NewDeployer creates a new deployer
@@ -36,6 +37,7 @@ func NewDeployer(cfg *config.Config, db *database.DB, privateKeyPath string) *De
 		deployRepo:     database.NewDeploymentRepository(db),
 		dockerClient:   docker.New(),
 		privateKeyPath: privateKeyPath,
+		sshUser:        "core", // Flatcar Linux SSH user
 	}
 }
 
@@ -83,13 +85,13 @@ func (d *Deployer) DeployServicesOnly(ctx context.Context) error {
 	d.log(deploymentID, "info", "Stopping existing containers...")
 	allServers := append(append(controlPlanes, dataPlanes...), appServers...)
 	for _, server := range allServers {
-		sshClient, err := ssh.New(server.PublicIP, "root", d.privateKeyPath)
+		sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
 		if err != nil {
 			d.log(deploymentID, "warn", fmt.Sprintf("Failed to connect to %s: %v", server.Name, err))
 			continue
 		}
 		// Stop containers and remove volumes
-		_, _ = sshClient.Execute("cd /opt/harbor && docker compose down -v 2>/dev/null || true")
+		_, _ = sshClient.Execute("cd /var/lib/harbor && docker compose down -v 2>/dev/null || true")
 		sshClient.Close()
 	}
 
@@ -193,10 +195,10 @@ func (d *Deployer) Deploy(ctx context.Context, deploymentID int64) error {
 	}
 	d.log(deploymentID, "info", "✓ All servers are SSH accessible")
 
-	// Install Docker on all servers in parallel
-	d.log(deploymentID, "info", "Installing Docker on all servers")
+	// Install docker-compose on all servers in parallel
+	d.log(deploymentID, "info", "Installing docker-compose on all servers")
 	if err := d.InstallDocker(deploymentID, servers); err != nil {
-		return fmt.Errorf("failed to install Docker: %w", err)
+		return fmt.Errorf("failed to install docker-compose: %w", err)
 	}
 
 	// Get server groups
@@ -300,7 +302,7 @@ func (d *Deployer) InstallDocker(deploymentID int64, servers []*models.Server) e
 
 			d.log(deploymentID, "info", fmt.Sprintf("Waiting for SSH on %s (%s)", srv.Name, srv.PublicIP))
 
-			sshClient, err := ssh.WaitForConnection(srv.PublicIP, "root", d.privateKeyPath, 5*time.Minute)
+			sshClient, err := ssh.WaitForConnection(srv.PublicIP, d.sshUser, d.privateKeyPath, 5*time.Minute)
 			if err != nil {
 				errChan <- fmt.Errorf("failed to connect to %s via SSH: %w", srv.Name, err)
 				return
@@ -314,13 +316,13 @@ func (d *Deployer) InstallDocker(deploymentID int64, servers []*models.Server) e
 				d.log(deploymentID, "warn", fmt.Sprintf("Failed to update status for %s: %v", srv.Name, err))
 			}
 
-			d.log(deploymentID, "info", fmt.Sprintf("Installing Docker on %s", srv.Name))
+			d.log(deploymentID, "info", fmt.Sprintf("Installing docker-compose on %s", srv.Name))
 			if err := d.dockerClient.Install(sshClient); err != nil {
-				errChan <- fmt.Errorf("failed to install Docker on %s: %w", srv.Name, err)
+				errChan <- fmt.Errorf("failed to install docker-compose on %s: %w", srv.Name, err)
 				return
 			}
 
-			d.log(deploymentID, "info", fmt.Sprintf("✓ Docker installed on %s", srv.Name))
+			d.log(deploymentID, "info", fmt.Sprintf("✓ docker-compose ready on %s", srv.Name))
 		}(server)
 	}
 
@@ -339,7 +341,7 @@ func (d *Deployer) InstallDocker(deploymentID int64, servers []*models.Server) e
 		return errors[0]
 	}
 
-	d.log(deploymentID, "info", "✓ Docker installed on all servers")
+	d.log(deploymentID, "info", "✓ docker-compose ready on all servers")
 	return nil
 }
 
@@ -353,14 +355,14 @@ func (d *Deployer) DeployControlPlane(deploymentID int64, server *models.Server)
 
 // DeployControlPlaneWithServers deploys services to the control plane server with provided server lists
 func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *models.Server, dataPlanes, appServers []*models.Server) error {
-	sshClient, err := ssh.New(server.PublicIP, "root", d.privateKeyPath)
+	sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to connect via SSH: %w", err)
 	}
 	defer sshClient.Close()
 
 	// Create deployment directory
-	if _, err := sshClient.Execute("mkdir -p /opt/harbor"); err != nil {
+	if _, err := sshClient.Execute("sudo mkdir -p /var/lib/harbor && sudo chown -R $USER:$USER /var/lib/harbor"); err != nil {
 		return fmt.Errorf("failed to create deployment directory: %w", err)
 	}
 
@@ -405,7 +407,7 @@ func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *mod
 		return fmt.Errorf("failed to render control plane template: %w", err)
 	}
 
-	if err := sshClient.WriteFile("/opt/harbor/docker-compose.yml", composeContent); err != nil {
+	if err := sshClient.WriteFile("/var/lib/harbor/docker-compose.yml", composeContent); err != nil {
 		return fmt.Errorf("failed to write docker-compose.yml: %w", err)
 	}
 
@@ -415,7 +417,7 @@ func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *mod
 		return fmt.Errorf("failed to render APISIX config: %w", err)
 	}
 
-	if err := sshClient.WriteFile("/opt/harbor/apisix-control.yaml", apisixConfig); err != nil {
+	if err := sshClient.WriteFile("/var/lib/harbor/apisix-control.yaml", apisixConfig); err != nil {
 		return fmt.Errorf("failed to write APISIX config: %w", err)
 	}
 
@@ -443,7 +445,7 @@ func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *mod
 		return fmt.Errorf("failed to render Prometheus config: %w", err)
 	}
 
-	if err := sshClient.WriteFile("/opt/harbor/prometheus.yml", prometheusConfig); err != nil {
+	if err := sshClient.WriteFile("/var/lib/harbor/prometheus.yml", prometheusConfig); err != nil {
 		return fmt.Errorf("failed to write Prometheus config: %w", err)
 	}
 
@@ -452,22 +454,22 @@ func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *mod
 		d.log(deploymentID, "info", "Copying Grafana configuration to control plane...")
 
 		// Create Grafana directories
-		if _, err := sshClient.Execute("mkdir -p /opt/harbor/grafana/config"); err != nil {
+		if _, err := sshClient.Execute("sudo mkdir -p /var/lib/harbor/grafana/config && sudo chown -R $USER:$USER /var/lib/harbor"); err != nil {
 			return fmt.Errorf("failed to create grafana config directory: %w", err)
 		}
 
 		// Copy grafana.ini
-		if err := sshClient.CopyFile("grafana/config/grafana.ini", "/opt/harbor/grafana/config/grafana.ini"); err != nil {
+		if err := sshClient.CopyFile("grafana/config/grafana.ini", "/var/lib/harbor/grafana/config/grafana.ini"); err != nil {
 			return fmt.Errorf("failed to copy grafana.ini: %w", err)
 		}
 
 		// Copy provisioning directory
-		if err := sshClient.CopyDir("grafana/provisioning", "/opt/harbor/grafana/provisioning"); err != nil {
+		if err := sshClient.CopyDir("grafana/provisioning", "/var/lib/harbor/grafana/provisioning"); err != nil {
 			return fmt.Errorf("failed to copy grafana provisioning directory: %w", err)
 		}
 
 		// Copy dashboards directory
-		if err := sshClient.CopyDir("grafana/dashboards", "/opt/harbor/grafana/dashboards"); err != nil {
+		if err := sshClient.CopyDir("grafana/dashboards", "/var/lib/harbor/grafana/dashboards"); err != nil {
 			return fmt.Errorf("failed to copy grafana dashboards directory: %w", err)
 		}
 
@@ -479,7 +481,7 @@ func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *mod
 		configPath := "harbor.yaml"
 		if _, err := os.Stat(configPath); err == nil {
 			d.log(deploymentID, "info", "Copying harbor config for autoscaler...")
-			if err := sshClient.CopyFile(configPath, "/opt/harbor/config.yaml"); err != nil {
+			if err := sshClient.CopyFile(configPath, "/var/lib/harbor/config.yaml"); err != nil {
 				return fmt.Errorf("failed to copy config file: %w", err)
 			}
 			d.log(deploymentID, "info", "✓ Config copied to control plane")
@@ -492,10 +494,10 @@ func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *mod
 		if _, err := os.Stat(k6ScriptPath); err == nil {
 			d.log(deploymentID, "info", "Copying k6 load test script to control plane...")
 			// Create k6 directory
-			if _, err := sshClient.Execute("mkdir -p /opt/harbor/k6"); err != nil {
+			if _, err := sshClient.Execute("sudo mkdir -p /var/lib/harbor/k6 && sudo chown -R $USER:$USER /var/lib/harbor"); err != nil {
 				return fmt.Errorf("failed to create k6 directory: %w", err)
 			}
-			if err := sshClient.CopyFile(k6ScriptPath, "/opt/harbor/k6/loadtest.js"); err != nil {
+			if err := sshClient.CopyFile(k6ScriptPath, "/var/lib/harbor/k6/loadtest.js"); err != nil {
 				return fmt.Errorf("failed to copy k6 script: %w", err)
 			}
 			d.log(deploymentID, "info", "✓ k6 script copied to control plane")
@@ -507,7 +509,7 @@ func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *mod
 	// Copy APISIX plugins directory
 	if _, err := os.Stat("apisix/plugins"); err == nil {
 		d.log(deploymentID, "info", "Copying APISIX plugins to control plane...")
-		if err := sshClient.CopyDir("apisix/plugins", "/opt/harbor/apisix/plugins"); err != nil {
+		if err := sshClient.CopyDir("apisix/plugins", "/var/lib/harbor/apisix/plugins"); err != nil {
 			return fmt.Errorf("failed to copy plugins directory: %w", err)
 		}
 		d.log(deploymentID, "info", "✓ Plugins copied to control plane")
@@ -516,7 +518,7 @@ func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *mod
 	}
 
 	// Start services
-	if err := d.dockerClient.ComposeUp(sshClient, "/opt/harbor"); err != nil {
+	if err := d.dockerClient.ComposeUp(sshClient, "/var/lib/harbor"); err != nil {
 		return fmt.Errorf("failed to start services: %w", err)
 	}
 
@@ -525,14 +527,14 @@ func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *mod
 
 // DeployDataPlane deploys services to a data plane server
 func (d *Deployer) DeployDataPlane(deploymentID int64, server *models.Server, controlPlaneIP string) error {
-	sshClient, err := ssh.New(server.PublicIP, "root", d.privateKeyPath)
+	sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to connect via SSH: %w", err)
 	}
 	defer sshClient.Close()
 
 	// Create deployment directory
-	if _, err := sshClient.Execute("mkdir -p /opt/harbor"); err != nil {
+	if _, err := sshClient.Execute("sudo mkdir -p /var/lib/harbor && sudo chown -R $USER:$USER /var/lib/harbor"); err != nil {
 		return fmt.Errorf("failed to create deployment directory: %w", err)
 	}
 
@@ -549,7 +551,7 @@ func (d *Deployer) DeployDataPlane(deploymentID int64, server *models.Server, co
 		return fmt.Errorf("failed to render data plane template: %w", err)
 	}
 
-	if err := sshClient.WriteFile("/opt/harbor/docker-compose.yml", composeContent); err != nil {
+	if err := sshClient.WriteFile("/var/lib/harbor/docker-compose.yml", composeContent); err != nil {
 		return fmt.Errorf("failed to write docker-compose.yml: %w", err)
 	}
 
@@ -559,21 +561,21 @@ func (d *Deployer) DeployDataPlane(deploymentID int64, server *models.Server, co
 		return fmt.Errorf("failed to render APISIX config: %w", err)
 	}
 
-	if err := sshClient.WriteFile("/opt/harbor/apisix-data.yaml", apisixConfig); err != nil {
+	if err := sshClient.WriteFile("/var/lib/harbor/apisix-data.yaml", apisixConfig); err != nil {
 		return fmt.Errorf("failed to write APISIX config: %w", err)
 	}
 
 	// Copy APISIX plugins directory
 	if _, err := os.Stat("apisix/plugins"); err == nil {
 		d.log(deploymentID, "info", fmt.Sprintf("Copying APISIX plugins to %s...", server.Name))
-		if err := sshClient.CopyDir("apisix/plugins", "/opt/harbor/apisix/plugins"); err != nil {
+		if err := sshClient.CopyDir("apisix/plugins", "/var/lib/harbor/apisix/plugins"); err != nil {
 			return fmt.Errorf("failed to copy plugins directory: %w", err)
 		}
 		d.log(deploymentID, "info", fmt.Sprintf("✓ Plugins copied to %s", server.Name))
 	}
 
 	// Start services
-	if err := d.dockerClient.ComposeUp(sshClient, "/opt/harbor"); err != nil {
+	if err := d.dockerClient.ComposeUp(sshClient, "/var/lib/harbor"); err != nil {
 		return fmt.Errorf("failed to start services: %w", err)
 	}
 
@@ -582,14 +584,14 @@ func (d *Deployer) DeployDataPlane(deploymentID int64, server *models.Server, co
 
 // DeployAppServer deploys services to an app server
 func (d *Deployer) DeployAppServer(deploymentID int64, server *models.Server) error {
-	sshClient, err := ssh.New(server.PublicIP, "root", d.privateKeyPath)
+	sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to connect via SSH: %w", err)
 	}
 	defer sshClient.Close()
 
 	// Create deployment directory
-	if _, err := sshClient.Execute("mkdir -p /opt/harbor"); err != nil {
+	if _, err := sshClient.Execute("sudo mkdir -p /var/lib/harbor && sudo chown -R $USER:$USER /var/lib/harbor"); err != nil {
 		return fmt.Errorf("failed to create deployment directory: %w", err)
 	}
 
@@ -607,7 +609,7 @@ func (d *Deployer) DeployAppServer(deploymentID int64, server *models.Server) er
 		return fmt.Errorf("failed to render app server template: %w", err)
 	}
 
-	if err := sshClient.WriteFile("/opt/harbor/docker-compose.yml", composeContent); err != nil {
+	if err := sshClient.WriteFile("/var/lib/harbor/docker-compose.yml", composeContent); err != nil {
 		return fmt.Errorf("failed to write docker-compose.yml: %w", err)
 	}
 
@@ -617,12 +619,12 @@ func (d *Deployer) DeployAppServer(deploymentID int64, server *models.Server) er
 		return fmt.Errorf("failed to render nginx config: %w", err)
 	}
 
-	if err := sshClient.WriteFile("/opt/harbor/nginx.conf", nginxContent); err != nil {
+	if err := sshClient.WriteFile("/var/lib/harbor/nginx.conf", nginxContent); err != nil {
 		return fmt.Errorf("failed to write nginx.conf: %w", err)
 	}
 
 	// Start services
-	if err := d.dockerClient.ComposeUp(sshClient, "/opt/harbor"); err != nil {
+	if err := d.dockerClient.ComposeUp(sshClient, "/var/lib/harbor"); err != nil {
 		return fmt.Errorf("failed to start services: %w", err)
 	}
 
@@ -632,7 +634,7 @@ func (d *Deployer) DeployAppServer(deploymentID int64, server *models.Server) er
 // ConfigureAPISIX configures APISIX via the Admin API
 func (d *Deployer) ConfigureAPISIX(deploymentID int64, controlPlane *models.Server, appServers []*models.Server) error {
 	// Connect to control plane via SSH to run curl commands locally
-	sshClient, err := ssh.New(controlPlane.PublicIP, "root", d.privateKeyPath)
+	sshClient, err := ssh.New(controlPlane.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to connect to control plane via SSH: %w", err)
 	}
@@ -734,7 +736,7 @@ func (d *Deployer) ConfigureAPISIX(deploymentID int64, controlPlane *models.Serv
 // UpdateAPISIXUpstreams updates only the upstream nodes (used for scaling operations)
 func (d *Deployer) UpdateAPISIXUpstreams(deploymentID int64, controlPlane *models.Server, appServers []*models.Server) error {
 	// Connect to control plane via SSH
-	sshClient, err := ssh.New(controlPlane.PublicIP, "root", d.privateKeyPath)
+	sshClient, err := ssh.New(controlPlane.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to connect to control plane: %w", err)
 	}
@@ -775,7 +777,7 @@ func (d *Deployer) UpdateAPISIXUpstreams(deploymentID int64, controlPlane *model
 // UpdatePrometheusConfig updates Prometheus scrape targets (used for scaling operations)
 func (d *Deployer) UpdatePrometheusConfig(deploymentID int64, controlPlane *models.Server, dataPlanes []*models.Server, appServers []*models.Server) error {
 	// Connect to control plane via SSH
-	sshClient, err := ssh.New(controlPlane.PublicIP, "root", d.privateKeyPath)
+	sshClient, err := ssh.New(controlPlane.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to connect to control plane: %w", err)
 	}
@@ -806,7 +808,7 @@ func (d *Deployer) UpdatePrometheusConfig(deploymentID int64, controlPlane *mode
 	}
 
 	// Write new config to server
-	if err := sshClient.WriteFile("/opt/harbor/prometheus.yml", prometheusConfig); err != nil {
+	if err := sshClient.WriteFile("/var/lib/harbor/prometheus.yml", prometheusConfig); err != nil {
 		return fmt.Errorf("failed to write Prometheus config: %w", err)
 	}
 
@@ -848,7 +850,7 @@ func (d *Deployer) RestartK6(ctx context.Context) error {
 	}
 
 	// Connect to control plane via SSH
-	sshClient, err := ssh.New(controlPlane[0].PublicIP, "root", d.privateKeyPath)
+	sshClient, err := ssh.New(controlPlane[0].PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to connect to control plane: %w", err)
 	}
@@ -904,7 +906,7 @@ func (d *Deployer) RestartK6(ctx context.Context) error {
 		-e "CONNECTION_TIMEOUT=%s" \
 		-e "REQUEST_TIMEOUT=%s" \
 		-e "GRACEFUL_STOP=%s" \
-		-v /opt/harbor/k6:/scripts:ro \
+		-v /var/lib/harbor/k6:/scripts:ro \
 		grafana/k6:latest run -o experimental-prometheus-rw /scripts/loadtest.js`,
 		networkName,
 		lbTargets,
@@ -937,7 +939,7 @@ func (d *Deployer) StopK6(ctx context.Context) error {
 	}
 
 	// Connect to control plane via SSH
-	sshClient, err := ssh.New(controlPlane[0].PublicIP, "root", d.privateKeyPath)
+	sshClient, err := ssh.New(controlPlane[0].PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to connect to control plane: %w", err)
 	}
@@ -966,7 +968,7 @@ func (d *Deployer) StopK6(ctx context.Context) error {
 
 // waitForControlPlane waits for control plane services to be ready
 func (d *Deployer) waitForControlPlane(deploymentID int64, server *models.Server) error {
-	sshClient, err := ssh.New(server.PublicIP, "root", d.privateKeyPath)
+	sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to connect via SSH: %w", err)
 	}
@@ -1022,7 +1024,7 @@ func (d *Deployer) waitForServersReady(deploymentID int64, servers []*models.Ser
 			d.log(deploymentID, "info", fmt.Sprintf("Waiting for SSH on %s...", srv.Name))
 
 			// Try to connect with timeout
-			client, err := ssh.WaitForConnection(srv.PublicIP, "root", d.privateKeyPath, 10*time.Minute)
+			client, err := ssh.WaitForConnection(srv.PublicIP, d.sshUser, d.privateKeyPath, 10*time.Minute)
 			if err != nil {
 				errChan <- fmt.Errorf("server %s not ready: %w", srv.Name, err)
 				return
@@ -1065,7 +1067,7 @@ func (d *Deployer) waitForDataPlanes(deploymentID int64, dataPlanes []*models.Se
 			defer wg.Done()
 			d.log(deploymentID, "info", fmt.Sprintf("Checking APISIX data plane on %s...", srv.Name))
 
-			sshClient, err := ssh.New(srv.PublicIP, "root", d.privateKeyPath)
+			sshClient, err := ssh.New(srv.PublicIP, d.sshUser, d.privateKeyPath)
 			if err != nil {
 				errChan <- fmt.Errorf("failed to connect to %s: %w", srv.Name, err)
 				return
@@ -1106,7 +1108,7 @@ func (d *Deployer) DeployToServer(serverIP string, roleLabel string, controlPlan
 	deploymentID := int64(0)
 
 	// Connect via SSH
-	sshClient, err := ssh.New(serverIP, "root", d.privateKeyPath)
+	sshClient, err := ssh.New(serverIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to connect via SSH: %w", err)
 	}

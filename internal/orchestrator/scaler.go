@@ -30,8 +30,8 @@ func NewManualScaler(cfg *config.Config, hetznerToken string, controlPlaneIP str
 	hetznerClient := hetzner.New(hetznerToken)
 	deployer := NewDeployer(cfg, db, sshKeyPath)
 
-	// Create SSH connection to control plane
-	sshClient, err := ssh.New(controlPlaneIP, "root", sshKeyPath)
+	// Create SSH connection to control plane (Flatcar uses 'core' user)
+	sshClient, err := ssh.New(controlPlaneIP, "core", sshKeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to control plane via SSH: %w", err)
 	}
@@ -92,7 +92,7 @@ func (m *ManualScaler) ScaleUp(ctx context.Context, role string, poolName string
 	serverRepo := database.NewServerRepository(m.db)
 
 	// Extract base name from control plane server name
-	baseName := m.config.Server.Name
+	baseName := m.config.Control.Name
 	if idx := strings.LastIndex(baseName, "-"); idx != -1 {
 		baseName = baseName[:idx]
 	}
@@ -141,14 +141,12 @@ func (m *ManualScaler) ScaleUp(ctx context.Context, role string, poolName string
 				Name:     fmt.Sprintf("%s-%s-%d", baseName, role, startIndex+i),
 				Type:     m.config.LoadBalancer.ServerType,
 				Location: m.config.LoadBalancer.Location,
-				Image:    m.config.LoadBalancer.Image,
 			}
 		case "app":
 			serverCfg = config.ServerConfig{
 				Name:     fmt.Sprintf("%s-%s-%d", baseName, role, startIndex+i),
 				Type:     m.config.App.ServerType,
 				Location: m.config.App.Location,
-				Image:    m.config.App.Image,
 			}
 		}
 
@@ -263,7 +261,7 @@ func (m *ManualScaler) ScaleUp(ctx context.Context, role string, poolName string
 
 // createServerViaHetzner creates a server using the hetzner client
 func (m *ManualScaler) createServerViaHetzner(ctx context.Context, cfg config.ServerConfig, role models.ServerRole, network *hcloud.Network, firewall *hcloud.Firewall, sshKey *hcloud.SSHKey) (*hcloud.Server, error) {
-	return CreateServerWithDatabase(ctx, m.hetznerClient, m.db, cfg, role, network, firewall, sshKey)
+	return CreateServerWithDatabase(ctx, m.hetznerClient, m.db, cfg, m.config.SnapshotID, role, network, firewall, sshKey)
 }
 
 // ScaleDown removes the specified number of servers
@@ -424,7 +422,7 @@ func (m *ManualScaler) updateK6Targets(ctx context.Context, dataPlanes []*models
 		-e "CONNECTION_TIMEOUT=%s" \
 		-e "REQUEST_TIMEOUT=%s" \
 		-e "GRACEFUL_STOP=%s" \
-		-v /opt/harbor/k6:/scripts:ro \
+		-v /var/lib/harbor/k6:/scripts:ro \
 		grafana/k6:latest run -o experimental-prometheus-rw /scripts/loadtest.js`,
 		networkName,
 		lbTargets,

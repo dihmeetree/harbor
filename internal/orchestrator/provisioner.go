@@ -64,7 +64,7 @@ func (p *Provisioner) Provision(ctx context.Context) error {
 
 	// Extract base name from control plane server name (e.g., "harbor-control" -> "harbor")
 	// This will be used as the prefix for all servers
-	baseName := p.config.Server.Name
+	baseName := p.config.Control.Name
 	if idx := strings.LastIndex(baseName, "-"); idx != -1 {
 		baseName = baseName[:idx]
 	}
@@ -94,7 +94,7 @@ func (p *Provisioner) Provision(ctx context.Context) error {
 	p.log(deployment.ID, "info", fmt.Sprintf("Firewall created: %s", firewall.Name))
 
 	// Create control plane server
-	controlPlane, err := p.createServer(ctx, deployment.ID, p.config.Server, models.RoleControlPlane, network, firewall, sshKey)
+	controlPlane, err := p.createServer(ctx, deployment.ID, p.config.Control, models.RoleControlPlane, network, firewall, sshKey)
 	if err != nil {
 		_ = p.deployRepo.UpdateStatus(deployment.ID, "failed")
 		return fmt.Errorf("failed to create control plane server: %w", err)
@@ -109,7 +109,6 @@ func (p *Provisioner) Provision(ctx context.Context) error {
 				Name:     fmt.Sprintf("%s-lb-%d", baseName, i+1),
 				Type:     p.config.LoadBalancer.ServerType,
 				Location: p.config.LoadBalancer.Location,
-				Image:    p.config.LoadBalancer.Image,
 			}
 
 			server, err := p.createServer(ctx, deployment.ID, serverCfg, models.RoleDataPlane, network, firewall, sshKey)
@@ -129,7 +128,6 @@ func (p *Provisioner) Provision(ctx context.Context) error {
 				Name:     fmt.Sprintf("%s-app-%d", baseName, i+1),
 				Type:     p.config.App.ServerType,
 				Location: p.config.App.Location,
-				Image:    p.config.App.Image,
 			}
 
 			server, err := p.createServer(ctx, deployment.ID, serverCfg, models.RoleApp, network, firewall, sshKey)
@@ -155,7 +153,6 @@ func (p *Provisioner) Provision(ctx context.Context) error {
 	}
 
 	_ = p.deployRepo.UpdateStatus(deployment.ID, "completed")
-	p.log(deployment.ID, "info", "Deployment completed successfully")
 
 	return nil
 }
@@ -181,7 +178,7 @@ func (p *Provisioner) createNetwork(ctx context.Context, deploymentID int64) (*h
 		p.config.Network.Name,
 		p.config.Network.IPRange,
 		p.config.Network.SubnetRange,
-		p.config.Server.Location,
+		p.config.Control.Location,
 	)
 	if err != nil {
 		return nil, err
@@ -270,12 +267,12 @@ func (p *Provisioner) createFirewall(ctx context.Context, _deploymentID int64) (
 
 // createServer creates a server
 func (p *Provisioner) createServer(ctx context.Context, deploymentID int64, cfg config.ServerConfig, role models.ServerRole, network *hcloud.Network, firewall *hcloud.Firewall, sshKey *hcloud.SSHKey) (*hcloud.Server, error) {
-	return CreateServerWithDatabase(ctx, p.hetzner, p.db, cfg, role, network, firewall, sshKey)
+	return CreateServerWithDatabase(ctx, p.hetzner, p.db, cfg, p.config.SnapshotID, role, network, firewall, sshKey)
 }
 
 // ensureSSHKey ensures an SSH key exists
 func (p *Provisioner) ensureSSHKey(ctx context.Context) (*hcloud.SSHKey, string, error) {
-	keyName := fmt.Sprintf("%s-key", p.config.Server.Name)
+	keyName := fmt.Sprintf("%s-key", p.config.Control.Name)
 
 	// Check if SSH_PRIVATE_KEY_PATH is provided
 	existingKeyPath := os.Getenv("SSH_PRIVATE_KEY_PATH")
@@ -446,10 +443,10 @@ func (p *Provisioner) waitForServersDeletion(ctx context.Context, servers []*mod
 	for i := 0; i < maxAttempts; i++ {
 		// Check each pending server
 		for hetznerID, name := range pendingServers {
-			// Try to get server from Hetzner - if it returns error, server is deleted
-			_, err := p.hetzner.GetServer(ctx, hetznerID)
-			if err != nil {
-				// Server is deleted
+			// Try to get server from Hetzner - if server is nil, it's deleted
+			server, err := p.hetzner.GetServer(ctx, hetznerID)
+			if err != nil || server == nil {
+				// Server is deleted (either error or nil response)
 				delete(pendingServers, hetznerID)
 				p.log(0, "info", fmt.Sprintf("  ✓ %s deleted", name))
 			}
@@ -501,20 +498,37 @@ func (p *Provisioner) Destroy(ctx context.Context) error {
 		}
 	}
 
-	// 2. Delete firewalls
+	// 2. Delete firewalls (with retry for "still in use" errors)
 	firewalls, err := p.fwRepo.GetAll()
 	if err != nil {
 		p.log(0, "error", fmt.Sprintf("Failed to get firewalls: %v", err))
 	} else {
 		for _, firewall := range firewalls {
 			p.log(0, "info", fmt.Sprintf("Deleting firewall: %s", firewall.Name))
-			if err := p.hetzner.DeleteFirewall(ctx, firewall.HetznerID); err != nil {
-				p.log(0, "error", fmt.Sprintf("Failed to delete firewall %s: %v", firewall.Name, err))
-			} else {
-				p.log(0, "info", fmt.Sprintf("✓ Deleted firewall: %s", firewall.Name))
+
+			// Retry firewall deletion up to 50 times with 2-second delays
+			// Firewalls can take time to detach from deleted servers
+			deleted := false
+			for i := 0; i < 50; i++ {
+				if err := p.hetzner.DeleteFirewall(ctx, firewall.HetznerID); err != nil {
+					if i < 49 && strings.Contains(err.Error(), "still in use") {
+						// Wait and retry
+						time.Sleep(2 * time.Second)
+						continue
+					}
+					p.log(0, "error", fmt.Sprintf("Failed to delete firewall %s: %v", firewall.Name, err))
+					break
+				} else {
+					deleted = true
+					p.log(0, "info", fmt.Sprintf("✓ Deleted firewall: %s", firewall.Name))
+					break
+				}
 			}
-			if err := p.fwRepo.Delete(firewall.HetznerID); err != nil {
-				p.log(0, "error", fmt.Sprintf("Failed to delete firewall from DB: %v", err))
+
+			if deleted {
+				if err := p.fwRepo.Delete(firewall.HetznerID); err != nil {
+					p.log(0, "error", fmt.Sprintf("Failed to delete firewall from DB: %v", err))
+				}
 			}
 		}
 	}

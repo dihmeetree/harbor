@@ -280,6 +280,20 @@ func (c *Client) GetImage(ctx context.Context, name string) (*hcloud.Image, erro
 	return image, nil
 }
 
+// GetSnapshot retrieves a snapshot by ID
+func (c *Client) GetSnapshot(ctx context.Context, id int64) (*hcloud.Image, error) {
+	image, _, err := c.hcloud.Image.GetByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get snapshot: %w", err)
+	}
+
+	if image == nil {
+		return nil, fmt.Errorf("snapshot with ID %d not found", id)
+	}
+
+	return image, nil
+}
+
 // GetLocation retrieves a location by name
 func (c *Client) GetLocation(ctx context.Context, name string) (*hcloud.Location, error) {
 	location, _, err := c.hcloud.Location.GetByName(ctx, name)

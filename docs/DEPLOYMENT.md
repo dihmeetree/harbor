@@ -313,13 +313,13 @@ harbor destroy
 
 ## Time Estimates
 
-| Phase                       | Duration      | Description                           |
-| --------------------------- | ------------- | ------------------------------------- |
-| Infrastructure Provisioning | 5-10 min      | Creating servers, networks, firewalls |
-| Docker Installation         | 5-10 min      | Installing Docker on all servers      |
-| Service Deployment          | 3-5 min       | Starting all containers               |
-| APISIX Configuration        | 1-2 min       | Configuring routes and upstreams      |
-| **Total**                   | **15-30 min** | Complete deployment                   |
+| Phase                       | Duration      | Description                                      |
+| --------------------------- | ------------- | ------------------------------------------------ |
+| Infrastructure Provisioning | 5-10 min      | Creating servers, networks, firewalls            |
+| docker-compose Installation | 2-5 min       | Installing docker-compose on all servers         |
+| Service Deployment          | 3-5 min       | Starting all containers                          |
+| APISIX Configuration        | 1-2 min       | Configuring routes and upstreams                 |
+| **Total**                   | **15-30 min** | Complete deployment                              |
 
 ## Troubleshooting
 
@@ -329,28 +329,28 @@ harbor destroy
 # Check server status
 harbor status
 
-# Manually SSH to server
-ssh -i .harbor/ssh/your-key root@<server-ip>
+# Manually SSH to server (Flatcar uses 'core' user)
+ssh -i .harbor/ssh/your-key core@<server-ip>
 ```
 
-### Docker Not Installing
+### docker-compose Not Installing
 
 ```bash
-# SSH to server
-ssh -i .harbor/ssh/your-key root@<server-ip>
+# SSH to server (Flatcar uses 'core' user)
+ssh -i .harbor/ssh/your-key core@<server-ip>
+
+# Check docker-compose
+/opt/bin/docker-compose version
 
 # Check Docker status
 systemctl status docker
-
-# Check installation logs
-journalctl -u docker
 ```
 
 ### APISIX Not Starting
 
 ```bash
-# SSH to control plane
-ssh root@<control-plane-ip>
+# SSH to control plane (Flatcar uses 'core' user)
+ssh -i .harbor/ssh/your-key core@<control-plane-ip>
 
 # Check containers
 docker ps -a
@@ -360,7 +360,7 @@ docker logs apisix-control-plane
 docker logs etcd
 
 # Check configs
-cat /opt/harbor/apisix-control.yaml
+cat /var/lib/harbor/apisix-control.yaml
 ```
 
 ### Routes Not Working
@@ -374,8 +374,8 @@ curl -H "X-API-KEY: your-key" \
 curl -H "X-API-KEY: your-key" \
   http://<control-plane-ip>:9180/apisix/admin/upstreams
 
-# Check APISIX logs
-ssh root@<data-plane-ip>
+# Check APISIX logs (Flatcar uses 'core' user)
+ssh -i .harbor/ssh/your-key core@<data-plane-ip>
 docker logs apisix-data-plane
 ```
 
@@ -464,11 +464,11 @@ View k6 logs to see test progress and results:
 # Get control plane IP
 harbor status
 
-# View live k6 output
-ssh root@<control-plane-ip> "docker logs k6 --tail 100 -f"
+# View live k6 output (Flatcar uses 'core' user)
+ssh -i .harbor/ssh/your-key core@<control-plane-ip> "docker logs k6 --tail 100 -f"
 
 # Check k6 container status
-ssh root@<control-plane-ip> "docker ps | grep k6"
+ssh -i .harbor/ssh/your-key core@<control-plane-ip> "docker ps | grep k6"
 ```
 
 Example output:

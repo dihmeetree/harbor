@@ -4,13 +4,16 @@
 # Cloud provider: "hetzner" or "digitalocean"
 provider: hetzner
 
+# Hetzner snapshot ID for Flatcar Linux (applies to all servers)
+# Build a snapshot using flatcar/flatcar.pkr.hcl first
+snapshot_id: 324002344
+
 # Control plane server configuration
 # This server runs APISIX Control Plane, etcd, Prometheus, cAdvisor, and node-exporter
-server:
+control:
   name: "harbor-control"
   type: "ccx33"
   location: "ash"
-  image: "ubuntu-24.04"
 
 # Private network configuration
 network:
@@ -47,7 +50,6 @@ loadbalancer:
   replicas: 2 # Number of data plane servers
   server_type: "ccx13" # Smaller instances for load balancers
   location: "ash"
-  image: "ubuntu-24.04"
 
 # Application configuration
 # These servers run your application containers, cAdvisor, and node-exporter
@@ -56,7 +58,6 @@ app:
   replicas: 2
   server_type: "ccx13"
   location: "ash"
-  image: "ubuntu-24.04"
 
 # APISIX configuration
 apisix:

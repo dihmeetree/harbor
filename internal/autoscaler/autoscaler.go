@@ -289,20 +289,18 @@ func (a *Autoscaler) scaleUp(ctx context.Context, roleLabel string, poolName str
 	}
 
 	// Determine server configuration based on role
-	var serverType, location, image string
+	var serverType, location string
 	var baseName string
 	switch roleLabel {
 	case "lb":
 		serverType = a.config.LoadBalancer.ServerType
 		location = a.config.LoadBalancer.Location
-		image = a.config.LoadBalancer.Image
-		baseName = strings.TrimSuffix(a.config.Server.Name, "-control")
+		baseName = strings.TrimSuffix(a.config.Control.Name, "-control")
 		baseName = fmt.Sprintf("%s-lb-%d", baseName, len(servers)+1)
 	case "app":
 		serverType = a.config.App.ServerType
 		location = a.config.App.Location
-		image = a.config.App.Image
-		baseName = strings.TrimSuffix(a.config.Server.Name, "-control")
+		baseName = strings.TrimSuffix(a.config.Control.Name, "-control")
 		baseName = fmt.Sprintf("%s-app-%d", baseName, len(servers)+1)
 	default:
 		return fmt.Errorf("unsupported role: %s", roleLabel)
@@ -335,10 +333,10 @@ func (a *Autoscaler) scaleUp(ctx context.Context, roleLabel string, poolName str
 		return fmt.Errorf("failed to get server type %s: %w", serverType, err)
 	}
 
-	// Get image object
-	img, _, err := a.hetznerClient.Image.GetByNameAndArchitecture(ctx, image, hcloud.ArchitectureX86)
+	// Get Flatcar snapshot
+	img, _, err := a.hetznerClient.Image.GetByID(ctx, a.config.SnapshotID)
 	if err != nil || img == nil {
-		return fmt.Errorf("failed to get image %s: %w", image, err)
+		return fmt.Errorf("failed to get snapshot %d: %w", a.config.SnapshotID, err)
 	}
 
 	// Get location object
@@ -779,7 +777,7 @@ func (a *Autoscaler) updateK6Config(ctx context.Context) error {
 		-e "CONNECTION_TIMEOUT=%s" \
 		-e "REQUEST_TIMEOUT=%s" \
 		-e "GRACEFUL_STOP=%s" \
-		-v /opt/harbor/k6:/scripts:ro \
+		-v /var/lib/harbor/k6:/scripts:ro \
 		grafana/k6:latest run /scripts/loadtest.js`,
 		networkName,
 		lbTargets,

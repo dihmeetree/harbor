@@ -4,6 +4,7 @@
 
 - Hetzner Cloud account with API token
 - Go 1.21+ installed (for building from source)
+- Packer installed (for building Flatcar snapshot)
 
 ## Installation
 
@@ -21,37 +22,47 @@ sudo mv harbor /usr/local/bin/
 
 ## Quick Deploy
 
-### 1. Initialize Configuration
+### 1. Build Flatcar Snapshot (One-time setup)
 
 ```bash
+cd flatcar
+export HCLOUD_TOKEN="your-hetzner-api-token"
+packer build flatcar.pkr.hcl
+# Note the snapshot ID from the output
+```
+
+### 2. Initialize Configuration
+
+```bash
+cd ..
 harbor init
 ```
 
 This creates `harbor.yaml` from the example template.
 
-### 2. Edit Configuration
+### 3. Edit Configuration
 
-Edit `harbor.yaml` to customize your deployment:
+Edit `harbor.yaml` with your snapshot ID and settings:
 
 ```yaml
 provider: hetzner
+snapshot_id: 327228288  # Use your snapshot ID from step 1
 
-server:
-  name: 'my-app'          # Change this to your app name
-  type: 'ccx13'           # Server type
-  location: 'ash'         # Hetzner location
-  image: 'ubuntu-24.04'
+control:
+  name: 'my-app-control'
+  type: 'ccx13'
+  location: 'ash'
 
 # ... rest of config
 ```
 
-### 3. Set API Token
+### 4. Set API Token
 
 ```bash
 export HETZNER_API_TOKEN="your-hetzner-api-token-here"
 ```
 
-### 4. Deploy
+### 5. Deploy
 
 ```bash
 harbor deploy
@@ -59,20 +70,21 @@ harbor deploy
 
 This will:
 - ✅ Create infrastructure (networks, firewalls, servers)
-- ✅ Install Docker on all servers
+- ✅ Provision Flatcar Linux servers from snapshot
+- ✅ Install docker-compose on all servers
 - ✅ Deploy APISIX control plane + etcd + Prometheus + Grafana + Autoscaler + k6 (if enabled)
 - ✅ Deploy APISIX data planes
 - ✅ Deploy your app
 - ✅ Configure APISIX routes and upstreams
 - ⏱️ Total time: 15-30 minutes
 
-### 5. Check Status
+### 6. Check Status
 
 ```bash
 harbor status
 ```
 
-### 6. Test Your Deployment
+### 7. Test Your Deployment
 
 ```bash
 # Get data plane IP from status command
@@ -85,14 +97,14 @@ curl http://$DATA_PLANE_IP/
 curl http://$DATA_PLANE_IP:9091/apisix/prometheus/metrics
 ```
 
-### 7. Access Services
+### 8. Access Services
 
 - **Your App**: `http://<data-plane-ip>`
 - **APISIX Admin API**: `http://<control-plane-ip>:9180`
 - **Prometheus**: `http://<control-plane-ip>:9090`
 - **Grafana**: `http://<control-plane-ip>:3000` (default login: admin/admin)
 
-### 8. Destroy (When Done)
+### 9. Destroy (When Done)
 
 ```bash
 harbor destroy
@@ -195,18 +207,19 @@ harbor apisix routes create
 Wait a bit longer for servers to boot:
 
 ```bash
-# Check server status on Hetzner dashboard
-# Or wait and retry
+# Check server status
+harbor status
+
+# Flatcar servers need 1-2 minutes to fully boot
 ```
 
-### "Docker installation failed"
+### "docker-compose installation failed"
 
 SSH to server and check:
 
 ```bash
-ssh -i .harbor/ssh/your-key root@<server-ip>
-systemctl status docker
-journalctl -u docker
+ssh -i .harbor/ssh/your-key core@<server-ip>
+/opt/bin/docker-compose version
 ```
 
 ### "APISIX not responding"
@@ -214,7 +227,8 @@ journalctl -u docker
 Check containers:
 
 ```bash
-ssh root@<control-plane-ip>
+# SSH to control plane (Flatcar uses 'core' user)
+ssh -i .harbor/ssh/your-key core@<control-plane-ip>
 docker ps -a
 docker logs apisix-control-plane
 docker logs etcd

@@ -71,6 +71,10 @@ func (c *Client) Execute(command string) (string, error) {
 
 	output, err := session.CombinedOutput(command)
 	if err != nil {
+		// Include the actual output in the error message for debugging
+		if len(output) > 0 {
+			return string(output), fmt.Errorf("command failed: %w\nOutput: %s", err, string(output))
+		}
 		return string(output), fmt.Errorf("command failed: %w", err)
 	}
 

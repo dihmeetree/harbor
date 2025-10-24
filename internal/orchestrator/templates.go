@@ -121,7 +121,7 @@ services:
     volumes:
       - ./config.yaml:/etc/harbor/config.yaml:ro
       - /root/.ssh:/root/.ssh:ro
-      - ./apisix/plugins:/opt/harbor/apisix/plugins:ro
+      - ./apisix/plugins:/var/lib/harbor/apisix/plugins:ro
     networks:
       - apisix
     depends_on:

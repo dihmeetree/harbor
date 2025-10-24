@@ -77,17 +77,17 @@ func ApplyK6Defaults(k6 *config.K6Config) {
 }
 
 // CreateServerWithDatabase creates a server and persists it to database
-func CreateServerWithDatabase(ctx context.Context, client *hetzner.Client, db *database.DB, cfg config.ServerConfig, role models.ServerRole, network *hcloud.Network, firewall *hcloud.Firewall, sshKey *hcloud.SSHKey) (*hcloud.Server, error) {
+func CreateServerWithDatabase(ctx context.Context, client *hetzner.Client, db *database.DB, cfg config.ServerConfig, snapshotID int64, role models.ServerRole, network *hcloud.Network, firewall *hcloud.Firewall, sshKey *hcloud.SSHKey) (*hcloud.Server, error) {
 	// Get server type
 	serverType, err := client.GetServerType(ctx, cfg.Type)
 	if err != nil {
 		return nil, err
 	}
 
-	// Get image
-	image, err := client.GetImage(ctx, cfg.Image)
+	// Get Flatcar snapshot
+	image, err := client.GetSnapshot(ctx, snapshotID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get snapshot %d: %w", snapshotID, err)
 	}
 
 	// Get location
@@ -149,7 +149,7 @@ func CreateServerWithDatabase(ctx context.Context, client *hetzner.Client, db *d
 		PublicIP:  server.PublicNet.IPv4.IP.String(),
 		PrivateIP: privateIP,
 		Location:  cfg.Location,
-		Image:     cfg.Image,
+		Image:     image.Name, // Flatcar snapshot name
 		Status:    string(server.Status),
 		NetworkID: dbNetwork.ID,
 		CreatedAt: time.Now(),
