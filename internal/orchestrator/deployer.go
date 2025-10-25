@@ -71,6 +71,8 @@ func (d *Deployer) DeployServicesOnly(ctx context.Context) error {
 		}
 		// Stop containers and remove volumes
 		_, _ = sshClient.Execute("cd /var/lib/harbor && docker compose down -v 2>/dev/null || true")
+		// Also remove k6 container if it exists (not managed by compose)
+		_, _ = sshClient.Execute("docker rm -f k6 2>/dev/null || true")
 		sshClient.Close()
 	}
 

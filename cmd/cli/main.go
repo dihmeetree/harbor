@@ -184,7 +184,6 @@ func redeployCmd() *cobra.Command {
 				return fmt.Errorf("redeployment failed: %w", err)
 			}
 
-			fmt.Println("\n✓ Services redeployed successfully!")
 			return nil
 		},
 	}
