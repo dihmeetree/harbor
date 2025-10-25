@@ -212,10 +212,9 @@ func (d *Deployer) RedeployAppServers(ctx context.Context) error {
 			return fmt.Errorf("failed to connect to %s: %w", server.Name, err)
 		}
 
-		// Stop containers on this server
-		d.log("info", fmt.Sprintf("  Stopping containers on %s", server.Name))
-		_, _ = sshClient.Execute("cd /var/lib/harbor && docker compose down -v 2>/dev/null || true")
-		_, _ = sshClient.Execute("docker stop $(docker ps -q) 2>/dev/null || true")
+		// Stop only user's app containers (not monitoring)
+		d.log("info", fmt.Sprintf("  Stopping app containers on %s", server.Name))
+		_, _ = sshClient.Execute("cd /var/lib/harbor && PATH=/opt/bin:$PATH docker-compose down 2>/dev/null || true")
 		sshClient.Close()
 
 		// Deploy to this server
