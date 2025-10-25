@@ -113,10 +113,12 @@ This will:
 - ✅ Verify Docker and docker-compose on all servers
 - ✅ Deploy APISIX control plane, etcd, and Prometheus
 - ✅ Deploy APISIX data planes
-- ✅ Deploy your application
+- ✅ Deploy your application using docker-compose
 - ✅ Configure APISIX routes and upstreams
 
 **Total time: 15-30 minutes**
+
+> **Note**: Harbor uses docker-compose for application deployment. Make sure you have a `docker-compose.yml` file and specify its path in your `harbor.yaml` config under `app.compose_file`.
 
 6. **Check status**:
 
@@ -169,10 +171,6 @@ firewall:
       source_ips: ["0.0.0.0/0", "::/0"]
       description: "HTTPS from anywhere"
 
-container:
-  name: "app"
-  image: "nginx:latest"
-
 loadbalancer:
   enabled: true
   replicas: 1
@@ -185,7 +183,7 @@ app:
   replicas: 1
   server_type: "ccx13"
   location: "ash"
-  service_name: "app"
+  compose_file: "./docker-compose.yml"  # Path to your docker-compose file
 
 apisix:
   admin_port: 9180
@@ -263,8 +261,12 @@ harbor validate
 # Deploy infrastructure
 harbor deploy
 
-# Redeploy services to existing servers
+# Redeploy services to existing servers (all components)
 harbor redeploy
+
+# Redeploy only app servers with zero downtime (rolling deployment)
+harbor redeploy-app
+harbor redeploy-app --compose-file ./docker-compose.yml
 
 # Manually scale servers
 harbor scale lb 5      # Scale load balancers to 5 servers
@@ -785,14 +787,48 @@ harbor redeploy
 
 ## Advanced Usage
 
-### Custom Application
+### Custom Application Deployment
 
-Replace nginx with your application:
+Harbor uses docker-compose for deploying applications. Create a `docker-compose.yml` file:
 
 ```yaml
-container:
-  name: "my-app"
-  image: "myregistry/myapp:latest"
+services:
+  app:
+    container_name: my-app
+    image: myregistry/myapp:latest
+    restart: always
+    ports:
+      - "80:80"
+    environment:
+      - APP_ENV=production
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+```
+
+Then specify it in your harbor.yaml:
+
+```yaml
+app:
+  enabled: true
+  replicas: 2
+  server_type: "ccx13"
+  location: "ash"
+  compose_file: "./docker-compose.yml"
+```
+
+Harbor will automatically:
+- Copy docker-compose.yml to each app server
+- Copy all volume-mounted files (e.g., `./config.yml`)
+- Replace `SERVER_ID_PLACEHOLDER` with actual server names
+- Run `docker compose up` on each server
+
+**Zero-downtime updates:**
+```bash
+# Update application with rolling deployment
+harbor redeploy-app
+
+# Override compose file location
+harbor redeploy-app --compose-file ./production-compose.yml
 ```
 
 ### SSL/TLS Configuration

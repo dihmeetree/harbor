@@ -38,11 +38,6 @@ firewall:
       source_ips: ["0.0.0.0/0", "::/0"]
       description: "HTTPS from anywhere"
 
-# Container configuration (for app pool)
-container:
-  name: "nginx-web"
-  image: "nginx:latest"
-
 # Load Balancer (APISIX Data Planes)
 # These servers run APISIX Data Plane, cAdvisor, and node-exporter
 loadbalancer:
@@ -52,12 +47,17 @@ loadbalancer:
   location: "ash"
 
 # Application configuration
-# These servers run your application containers, cAdvisor, and node-exporter
+# These servers run your application containers using docker-compose
 app:
   enabled: true
   replicas: 2
   server_type: "ccx13"
   location: "ash"
+  # Path to docker-compose.yml file for your application
+  # Harbor will copy this file and all volume-mounted files to each app server
+  # Use SERVER_ID_PLACEHOLDER in files to get the actual server name (e.g., harbor-app-1)
+  # Example: compose_file: "./docker-compose.yml"
+  compose_file: "./docker-compose.yml"
 
 # APISIX configuration
 apisix:
