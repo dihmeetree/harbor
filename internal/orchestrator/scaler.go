@@ -100,34 +100,43 @@ func (m *ManualScaler) ScaleUp(ctx context.Context, role string, poolName string
 	// Get network from database
 	netRepo := database.NewNetworkRepository(m.db)
 	networks, err := netRepo.GetAll()
-	if err != nil || len(networks) == 0 {
-		return fmt.Errorf("failed to get network: %w", err)
+	if err != nil {
+		return fmt.Errorf("failed to query networks from database: %w", err)
+	}
+	if len(networks) == 0 {
+		return fmt.Errorf("no network found in database - infrastructure may not be properly deployed. Run 'harbor deploy' first")
 	}
 	network, err := m.hetznerClient.GetNetwork(ctx, networks[0].HetznerID)
 	if err != nil {
-		return fmt.Errorf("failed to get hetzner network: %w", err)
+		return fmt.Errorf("failed to get network (ID: %d) from Hetzner: %w", networks[0].HetznerID, err)
 	}
 
 	// Get firewall from database
 	fwRepo := database.NewFirewallRepository(m.db)
 	firewalls, err := fwRepo.GetAll()
-	if err != nil || len(firewalls) == 0 {
-		return fmt.Errorf("failed to get firewall: %w", err)
+	if err != nil {
+		return fmt.Errorf("failed to query firewalls from database: %w", err)
+	}
+	if len(firewalls) == 0 {
+		return fmt.Errorf("no firewall found in database - infrastructure may not be properly deployed. Run 'harbor deploy' first")
 	}
 	firewall, err := m.hetznerClient.GetFirewall(ctx, firewalls[0].HetznerID)
 	if err != nil {
-		return fmt.Errorf("failed to get hetzner firewall: %w", err)
+		return fmt.Errorf("failed to get firewall (ID: %d) from Hetzner: %w", firewalls[0].HetznerID, err)
 	}
 
 	// Get SSH key from database
 	sshKeyRepo := database.NewSSHKeyRepository(m.db)
 	sshKeys, err := sshKeyRepo.GetAll()
-	if err != nil || len(sshKeys) == 0 {
-		return fmt.Errorf("failed to get SSH key: %w", err)
+	if err != nil {
+		return fmt.Errorf("failed to query SSH keys from database: %w", err)
+	}
+	if len(sshKeys) == 0 {
+		return fmt.Errorf("no SSH key found in database - infrastructure may not be properly deployed. Run 'harbor deploy' first")
 	}
 	sshKey, err := m.hetznerClient.GetSSHKey(ctx, sshKeys[0].HetznerID)
 	if err != nil {
-		return fmt.Errorf("failed to get hetzner SSH key: %w", err)
+		return fmt.Errorf("failed to get SSH key (ID: %d) from Hetzner: %w", sshKeys[0].HetznerID, err)
 	}
 
 	// Create servers and track them
@@ -183,11 +192,14 @@ func (m *ManualScaler) ScaleUp(ctx context.Context, role string, poolName string
 	fmt.Printf("[info] Deploying %d %s server(s)\n", len(newServers), poolName)
 
 	// Get control plane IP for data planes
-	controlPlanes, _ := serverRepo.GetByRole(models.RoleControlPlane)
-	var controlPlaneIP string
-	if len(controlPlanes) > 0 {
-		controlPlaneIP = controlPlanes[0].PrivateIP
+	controlPlanes, err := serverRepo.GetByRole(models.RoleControlPlane)
+	if err != nil {
+		return fmt.Errorf("failed to get control plane from database: %w", err)
 	}
+	if len(controlPlanes) == 0 {
+		return fmt.Errorf("no control plane found in database - infrastructure may not be properly deployed")
+	}
+	controlPlaneIP := controlPlanes[0].PrivateIP
 
 	for _, server := range newServers {
 		switch role {
@@ -272,13 +284,33 @@ func (m *ManualScaler) ScaleDown(ctx context.Context, role string, poolName stri
 		return fmt.Errorf("failed to get servers from Hetzner: %w", err)
 	}
 
-	if len(hetznerServers) < count {
-		return fmt.Errorf("cannot remove %d servers, only %d exist", count, len(hetznerServers))
+	currentCount := len(hetznerServers)
+	if currentCount < count {
+		return fmt.Errorf("cannot remove %d servers, only %d exist", count, currentCount)
+	}
+
+	// Check minimum replica constraints from autoscaler config
+	if m.config.Autoscaler.Enabled {
+		remainingCount := currentCount - count
+		if remainingCount < m.config.Autoscaler.MinReplicas {
+			return fmt.Errorf("cannot scale down to %d servers: would violate minimum replica count of %d (configured in autoscaler settings)", remainingCount, m.config.Autoscaler.MinReplicas)
+		}
+	}
+
+	// Determine database role for the given label
+	var dbRole models.ServerRole
+	switch role {
+	case "lb":
+		dbRole = models.RoleDataPlane
+	case "app":
+		dbRole = models.RoleApp
+	default:
+		return fmt.Errorf("unsupported role: %s", role)
 	}
 
 	serverRepo := database.NewServerRepository(m.db)
 
-	fmt.Printf("[info] Removing %d %s server(s)\n", count, poolName)
+	fmt.Printf("[info] Removing %d %s server(s) (%d -> %d)\n", count, poolName, currentCount, currentCount-count)
 
 	// Remove the newest servers first (highest Hetzner IDs)
 	for range count {
@@ -295,16 +327,27 @@ func (m *ManualScaler) ScaleDown(ctx context.Context, role string, poolName stri
 			return fmt.Errorf("failed to delete server %s from Hetzner: %w", serverToRemove.Name, err)
 		}
 
-		// Try to delete from database if it exists
-		dbServers, _ := serverRepo.GetByRole(models.RoleApp)
-		for _, dbSrv := range dbServers {
-			if dbSrv.HetznerID == serverToRemove.ID {
-				_ = serverRepo.Delete(dbSrv.ID)
-				break
+		// Try to delete from database if it exists (using correct role)
+		dbServers, err := serverRepo.GetByRole(dbRole)
+		if err != nil {
+			fmt.Printf("[warn] Failed to query database for server cleanup: %v\n", err)
+		} else {
+			found := false
+			for _, dbSrv := range dbServers {
+				if dbSrv.HetznerID == serverToRemove.ID {
+					if err := serverRepo.Delete(dbSrv.ID); err != nil {
+						fmt.Printf("[warn] Failed to delete server %s from database: %v\n", serverToRemove.Name, err)
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				fmt.Printf("[info] Server %s not found in database (may have been created by autoscaler)\n", serverToRemove.Name)
 			}
 		}
 
-		fmt.Printf("[info] ✓ Server %s removed\n", serverToRemove.Name)
+		fmt.Printf("[info] ✓ Server %s removed from Hetzner\n", serverToRemove.Name)
 
 		// Remove from servers list for next iteration
 		var newServers []*hcloud.Server
@@ -317,9 +360,12 @@ func (m *ManualScaler) ScaleDown(ctx context.Context, role string, poolName stri
 	}
 
 	// Get control plane from database
-	controlPlanes, _ := serverRepo.GetByRole(models.RoleControlPlane)
+	controlPlanes, err := serverRepo.GetByRole(models.RoleControlPlane)
+	if err != nil {
+		return fmt.Errorf("failed to get control plane from database: %w", err)
+	}
 	if len(controlPlanes) == 0 {
-		return fmt.Errorf("no control plane found")
+		return fmt.Errorf("no control plane found in database")
 	}
 
 	// Update configurations based on role

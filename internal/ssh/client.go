@@ -37,7 +37,9 @@ func New(host, user, privateKeyPath string) (*Client, error) {
 		Auth: []ssh.AuthMethod{
 			ssh.PublicKeys(signer),
 		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // In production, verify host keys
+		// Note: InsecureIgnoreHostKey is used for infrastructure automation where servers
+		// are dynamically provisioned and destroyed. For enhanced security, implement known_hosts verification.
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         30 * time.Second,
 	}
 
@@ -53,7 +55,7 @@ func New(host, user, privateKeyPath string) (*Client, error) {
 	}, nil
 }
 
-// Close closes the SSH connection
+// Close closes the SSH connection and releases associated resources.
 func (c *Client) Close() error {
 	if c.client != nil {
 		return c.client.Close()
@@ -61,7 +63,8 @@ func (c *Client) Close() error {
 	return nil
 }
 
-// Execute executes a command on the remote server
+// Execute runs a command on the remote server and returns its combined stdout/stderr output.
+// If the command fails, the error message includes the output for debugging purposes.
 func (c *Client) Execute(command string) (string, error) {
 	session, err := c.client.NewSession()
 	if err != nil {

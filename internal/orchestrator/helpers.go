@@ -12,16 +12,21 @@ import (
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 )
 
-// HcloudToModels converts an hcloud.Server to models.Server
-func HcloudToModels(hcloudServer *hcloud.Server) *models.Server {
-	privateIP := ""
-	if len(hcloudServer.PrivateNet) > 0 {
-		privateIP = hcloudServer.PrivateNet[0].IP.String()
+// ExtractPrivateIP extracts the private IP from an hcloud.Server.
+// Returns empty string if no private network is configured.
+func ExtractPrivateIP(server *hcloud.Server) string {
+	if len(server.PrivateNet) > 0 {
+		return server.PrivateNet[0].IP.String()
 	}
+	return ""
+}
+
+// HcloudToModels converts an hcloud.Server to models.Server.
+func HcloudToModels(hcloudServer *hcloud.Server) *models.Server {
 	return &models.Server{
 		Name:      hcloudServer.Name,
 		PublicIP:  hcloudServer.PublicNet.IPv4.IP.String(),
-		PrivateIP: privateIP,
+		PrivateIP: ExtractPrivateIP(hcloudServer),
 	}
 }
 

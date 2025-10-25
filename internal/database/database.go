@@ -17,11 +17,10 @@ type DB struct {
 	conn *sql.DB
 }
 
-// New creates a new database connection
+// New creates a new database connection.
+// The database file will be created if it doesn't exist.
+// The caller is responsible for creating the parent directory if needed.
 func New(dbPath string) (*DB, error) {
-	// Directory creation will be handled by the caller if needed
-	_ = filepath.Dir(dbPath)
-
 	conn, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)

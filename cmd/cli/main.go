@@ -191,6 +191,22 @@ func redeployCmd() *cobra.Command {
 	}
 }
 
+// printServerGroup prints server information for a group of servers
+func printServerGroup(servers []*hcloud.Server) {
+	for _, s := range servers {
+		privateIP := orchestrator.ExtractPrivateIP(s)
+		autoscaled := s.Labels["autoscale"] == "true"
+
+		fmt.Printf("  - %s\n", s.Name)
+		fmt.Printf("    Public IP:  %s\n", s.PublicNet.IPv4.IP.String())
+		fmt.Printf("    Private IP: %s\n", privateIP)
+		fmt.Printf("    Status:     %s\n", s.Status)
+		if autoscaled {
+			fmt.Printf("    Autoscaled: yes\n")
+		}
+	}
+}
+
 func statusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
@@ -231,63 +247,21 @@ func statusCmd() *cobra.Command {
 			// Print control plane
 			if controlPlanes, ok := roleGroups["control"]; ok {
 				fmt.Println("Control Plane:")
-				for _, s := range controlPlanes {
-					privateIP := ""
-					if len(s.PrivateNet) > 0 {
-						privateIP = s.PrivateNet[0].IP.String()
-					}
-					autoscaled := s.Labels["autoscale"] == "true"
-
-					fmt.Printf("  - %s\n", s.Name)
-					fmt.Printf("    Public IP:  %s\n", s.PublicNet.IPv4.IP.String())
-					fmt.Printf("    Private IP: %s\n", privateIP)
-					fmt.Printf("    Status:     %s\n", s.Status)
-					if autoscaled {
-						fmt.Printf("    Autoscaled: yes\n")
-					}
-				}
+				printServerGroup(controlPlanes)
 				fmt.Println()
 			}
 
 			// Print data planes (load balancers)
 			if dataPlanes, ok := roleGroups["lb"]; ok {
 				fmt.Printf("Load Balancers (%d):\n", len(dataPlanes))
-				for _, s := range dataPlanes {
-					privateIP := ""
-					if len(s.PrivateNet) > 0 {
-						privateIP = s.PrivateNet[0].IP.String()
-					}
-					autoscaled := s.Labels["autoscale"] == "true"
-
-					fmt.Printf("  - %s\n", s.Name)
-					fmt.Printf("    Public IP:  %s\n", s.PublicNet.IPv4.IP.String())
-					fmt.Printf("    Private IP: %s\n", privateIP)
-					fmt.Printf("    Status:     %s\n", s.Status)
-					if autoscaled {
-						fmt.Printf("    Autoscaled: yes\n")
-					}
-				}
+				printServerGroup(dataPlanes)
 				fmt.Println()
 			}
 
 			// Print app servers
 			if appServers, ok := roleGroups["app"]; ok {
 				fmt.Printf("App Servers (%d):\n", len(appServers))
-				for _, s := range appServers {
-					privateIP := ""
-					if len(s.PrivateNet) > 0 {
-						privateIP = s.PrivateNet[0].IP.String()
-					}
-					autoscaled := s.Labels["autoscale"] == "true"
-
-					fmt.Printf("  - %s\n", s.Name)
-					fmt.Printf("    Public IP:  %s\n", s.PublicNet.IPv4.IP.String())
-					fmt.Printf("    Private IP: %s\n", privateIP)
-					fmt.Printf("    Status:     %s\n", s.Status)
-					if autoscaled {
-						fmt.Printf("    Autoscaled: yes\n")
-					}
-				}
+				printServerGroup(appServers)
 			}
 
 			return nil

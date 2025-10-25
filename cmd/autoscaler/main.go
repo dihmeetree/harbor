@@ -59,7 +59,11 @@ func main() {
 	}
 
 	// Create autoscaler
-	as := autoscaler.NewAutoscaler(cfg, prometheusURL, hetznerToken, apisixURL, apisixKey, sshKeyPath)
+	as, err := autoscaler.NewAutoscaler(cfg, prometheusURL, hetznerToken, apisixURL, apisixKey, sshKeyPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create autoscaler: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Setup signal handling
 	ctx, cancel := context.WithCancel(context.Background())

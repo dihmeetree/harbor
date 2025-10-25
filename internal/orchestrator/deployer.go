@@ -28,7 +28,9 @@ type Deployer struct {
 	sshUser        string // SSH username for connecting to servers
 }
 
-// NewDeployer creates a new deployer
+// NewDeployer creates a new Deployer instance for managing service deployments.
+// The deployer uses the provided configuration, database connection, and SSH private key
+// to deploy and manage services across the infrastructure.
 func NewDeployer(cfg *config.Config, db *database.DB, privateKeyPath string) *Deployer {
 	return &Deployer{
 		config:         cfg,
@@ -41,7 +43,10 @@ func NewDeployer(cfg *config.Config, db *database.DB, privateKeyPath string) *De
 	}
 }
 
-// DeployServicesOnly redeploys services to existing infrastructure without provisioning
+// DeployServicesOnly redeploys services to existing infrastructure without provisioning new servers.
+// It queries Hetzner for current servers, stops existing containers, and redeploys all services
+// (control plane, data planes, app servers) with the latest configuration from harbor.yaml.
+// This is useful for updating service configuration, restarting services, or recovering from failures.
 func (d *Deployer) DeployServicesOnly(ctx context.Context) error {
 	// Create a new deployment entry
 	deployment := &models.Deployment{
@@ -178,7 +183,11 @@ func (d *Deployer) DeployServicesOnly(ctx context.Context) error {
 	return nil
 }
 
-// Deploy deploys all services
+// Deploy deploys all services to freshly provisioned infrastructure.
+// It orchestrates the complete deployment workflow: waits for servers to be SSH-accessible,
+// installs Docker on all servers, deploys the control plane, and then deploys data planes
+// and app servers in parallel. Finally, it configures APISIX routes and upstreams.
+// This method is typically called after Provision() creates the infrastructure.
 func (d *Deployer) Deploy(ctx context.Context, deploymentID int64) error {
 	d.log(deploymentID, "info", "Starting service deployment")
 
@@ -289,8 +298,9 @@ func (d *Deployer) Deploy(ctx context.Context, deploymentID int64) error {
 	return nil
 }
 
-// installDocker installs Docker on all servers in parallel
-// InstallDocker installs Docker on the specified servers
+// InstallDocker installs Docker and docker-compose on the specified servers in parallel.
+// It uses SSH to remotely execute the Docker installation script on Flatcar Linux servers.
+// All installations run concurrently with error aggregation via error channel.
 func (d *Deployer) InstallDocker(deploymentID int64, servers []*models.Server) error {
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(servers))
@@ -345,7 +355,9 @@ func (d *Deployer) InstallDocker(deploymentID int64, servers []*models.Server) e
 	return nil
 }
 
-// DeployControlPlane deploys services to the control plane server (queries DB for servers)
+// DeployControlPlane deploys all control plane services to the control plane server.
+// It queries the database for current data planes and app servers to configure k6 targets.
+// This is a convenience wrapper around DeployControlPlaneWithServers.
 func (d *Deployer) DeployControlPlane(deploymentID int64, server *models.Server) error {
 	// Get servers from database
 	dataPlanes, _ := d.serverRepo.GetByRole(models.RoleDataPlane)
@@ -353,7 +365,9 @@ func (d *Deployer) DeployControlPlane(deploymentID int64, server *models.Server)
 	return d.DeployControlPlaneWithServers(deploymentID, server, dataPlanes, appServers)
 }
 
-// DeployControlPlaneWithServers deploys services to the control plane server with provided server lists
+// DeployControlPlaneWithServers deploys the complete control plane stack including APISIX,
+// etcd, Prometheus, Grafana, autoscaler, and k6 load testing. It generates docker-compose
+// configuration with Prometheus targets for all servers and k6 targets for data planes.
 func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *models.Server, dataPlanes, appServers []*models.Server) error {
 	sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
@@ -525,7 +539,9 @@ func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *mod
 	return nil
 }
 
-// DeployDataPlane deploys services to a data plane server
+// DeployDataPlane deploys APISIX data plane services to a load balancer server.
+// It configures the data plane to connect to the control plane's etcd instance and
+// deploys monitoring agents (cAdvisor, node-exporter) for metrics collection.
 func (d *Deployer) DeployDataPlane(deploymentID int64, server *models.Server, controlPlaneIP string) error {
 	sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
@@ -582,7 +598,9 @@ func (d *Deployer) DeployDataPlane(deploymentID int64, server *models.Server, co
 	return nil
 }
 
-// DeployAppServer deploys services to an app server
+// DeployAppServer deploys the user's application container to an app server.
+// It configures the application with nginx reverse proxy and monitoring agents.
+// The application is exposed on port 80 and registered as an upstream in APISIX.
 func (d *Deployer) DeployAppServer(deploymentID int64, server *models.Server) error {
 	sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
@@ -631,7 +649,9 @@ func (d *Deployer) DeployAppServer(deploymentID int64, server *models.Server) er
 	return nil
 }
 
-// ConfigureAPISIX configures APISIX via the Admin API
+// ConfigureAPISIX configures APISIX routes, upstreams, global rules, and SSL certificates.
+// It waits for the APISIX Admin API to be ready, then creates upstreams pointing to app servers,
+// configures routes from harbor.yaml, and optionally sets up SSL/TLS certificates.
 func (d *Deployer) ConfigureAPISIX(deploymentID int64, controlPlane *models.Server, appServers []*models.Server) error {
 	// Connect to control plane via SSH to run curl commands locally
 	sshClient, err := ssh.New(controlPlane.PublicIP, d.sshUser, d.privateKeyPath)
@@ -733,7 +753,9 @@ func (d *Deployer) ConfigureAPISIX(deploymentID int64, controlPlane *models.Serv
 	return nil
 }
 
-// UpdateAPISIXUpstreams updates only the upstream nodes (used for scaling operations)
+// UpdateAPISIXUpstreams updates only the upstream backend nodes in APISIX.
+// This is used during scaling operations to add or remove app servers from the load balancer
+// without recreating routes or other APISIX configuration.
 func (d *Deployer) UpdateAPISIXUpstreams(deploymentID int64, controlPlane *models.Server, appServers []*models.Server) error {
 	// Connect to control plane via SSH
 	sshClient, err := ssh.New(controlPlane.PublicIP, d.sshUser, d.privateKeyPath)
@@ -774,7 +796,9 @@ func (d *Deployer) UpdateAPISIXUpstreams(deploymentID int64, controlPlane *model
 	return nil
 }
 
-// UpdatePrometheusConfig updates Prometheus scrape targets (used for scaling operations)
+// UpdatePrometheusConfig updates the Prometheus scrape targets configuration.
+// This is used during scaling operations to add or remove servers from Prometheus monitoring.
+// After updating the configuration file, it triggers a hot reload of Prometheus.
 func (d *Deployer) UpdatePrometheusConfig(deploymentID int64, controlPlane *models.Server, dataPlanes []*models.Server, appServers []*models.Server) error {
 	// Connect to control plane via SSH
 	sshClient, err := ssh.New(controlPlane.PublicIP, d.sshUser, d.privateKeyPath)
@@ -823,7 +847,9 @@ func (d *Deployer) UpdatePrometheusConfig(deploymentID int64, controlPlane *mode
 	return nil
 }
 
-// RestartK6 restarts the k6 load testing container with the latest configuration from harbor.yaml
+// RestartK6 restarts the k6 load testing container with the latest configuration.
+// It stops the existing k6 container, updates the configuration with current data plane targets,
+// and starts a new k6 container with parameters from harbor.yaml (rate, duration, VUs, etc).
 func (d *Deployer) RestartK6(ctx context.Context) error {
 	// Get control plane server
 	controlPlane, err := d.serverRepo.GetByRole(models.RoleControlPlane)
@@ -927,7 +953,9 @@ func (d *Deployer) RestartK6(ctx context.Context) error {
 	return nil
 }
 
-// StopK6 stops and removes the k6 load testing container
+// StopK6 stops and removes the k6 load testing container from the control plane.
+// If the k6 container is not running, it returns without error. This is useful for
+// temporarily halting load testing without removing configuration.
 func (d *Deployer) StopK6(ctx context.Context) error {
 	// Get control plane server
 	controlPlane, err := d.serverRepo.GetByRole(models.RoleControlPlane)
@@ -1101,8 +1129,9 @@ func (d *Deployer) waitForDataPlanes(deploymentID int64, dataPlanes []*models.Se
 	return nil
 }
 
-// log adds a log entry to the deployment
-// DeployToServer deploys services to a single server (used by autoscaler)
+// DeployToServer deploys services to a single server based on its role.
+// This method is primarily used by the autoscaler when adding new servers dynamically.
+// It installs Docker and deploys either data plane or app services depending on the role label.
 func (d *Deployer) DeployToServer(serverIP string, roleLabel string, controlPlaneIP string) error {
 	// Use a fake deployment ID for logging
 	deploymentID := int64(0)

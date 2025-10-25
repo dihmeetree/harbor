@@ -46,15 +46,22 @@ type PrometheusResponse struct {
 	} `json:"data"`
 }
 
-// NewAutoscaler creates a new autoscaler
-func NewAutoscaler(cfg *config.Config, prometheusURL string, hetznerToken string, apisixURL string, apisixKey string, sshKeyPath string) *Autoscaler {
+// NewAutoscaler creates a new autoscaler.
+// Returns an error if the database cannot be opened or the home directory cannot be determined.
+func NewAutoscaler(cfg *config.Config, prometheusURL string, hetznerToken string, apisixURL string, apisixKey string, sshKeyPath string) (*Autoscaler, error) {
 	hetznerClient := hcloud.NewClient(hcloud.WithToken(hetznerToken))
 	apisixClient := apisix.New(apisixURL, apisixKey)
 
 	// Create a database for the deployer (won't be used for logs with deploymentID=0)
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user home directory: %w", err)
+	}
 	dbPath := fmt.Sprintf("%s/.harbor/state.db", homeDir)
-	db, _ := database.New(dbPath)
+	db, err := database.New(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
 
 	// Create deployer for service deployment
 	deployer := orchestrator.NewDeployer(cfg, db, sshKeyPath)
@@ -68,7 +75,7 @@ func NewAutoscaler(cfg *config.Config, prometheusURL string, hetznerToken string
 		deployer:      deployer,
 		lastScaleTime: make(map[string]time.Time),
 		stopChan:      make(chan struct{}),
-	}
+	}, nil
 }
 
 // Start starts the autoscaler loop
@@ -161,8 +168,9 @@ func (a *Autoscaler) checkPool(ctx context.Context, roleLabel string, poolName s
 	var serverIPs []string
 	for _, srv := range servers {
 		// Use private IP if available, otherwise public IP
-		if len(srv.PrivateNet) > 0 {
-			serverIPs = append(serverIPs, srv.PrivateNet[0].IP.String())
+		privateIP := orchestrator.ExtractPrivateIP(srv)
+		if privateIP != "" {
+			serverIPs = append(serverIPs, privateIP)
 		} else {
 			serverIPs = append(serverIPs, srv.PublicNet.IPv4.IP.String())
 		}
@@ -383,10 +391,7 @@ func (a *Autoscaler) scaleUp(ctx context.Context, roleLabel string, poolName str
 	}
 
 	// Get private IP
-	var privateIP string
-	if len(server.PrivateNet) > 0 {
-		privateIP = server.PrivateNet[0].IP.String()
-	}
+	privateIP := orchestrator.ExtractPrivateIP(server)
 
 	// Get control plane IP for data plane configuration
 	var controlPlaneIP string
@@ -399,9 +404,7 @@ func (a *Autoscaler) scaleUp(ctx context.Context, roleLabel string, poolName str
 		if err != nil || len(controlPlanes) == 0 {
 			return fmt.Errorf("failed to get control plane: %w", err)
 		}
-		if len(controlPlanes[0].PrivateNet) > 0 {
-			controlPlaneIP = controlPlanes[0].PrivateNet[0].IP.String()
-		}
+		controlPlaneIP = orchestrator.ExtractPrivateIP(controlPlanes[0])
 	}
 
 	// Deploy services using the deployer
@@ -472,10 +475,7 @@ func (a *Autoscaler) scaleDown(ctx context.Context, roleLabel string, poolName s
 	a.log("info", fmt.Sprintf("[%s] Removing server: %s (ID: %d)", poolName, serverToRemove.Name, serverToRemove.ID))
 
 	// Get private IP for APISIX upstream removal
-	var privateIP string
-	if len(serverToRemove.PrivateNet) > 0 {
-		privateIP = serverToRemove.PrivateNet[0].IP.String()
-	}
+	privateIP := orchestrator.ExtractPrivateIP(serverToRemove)
 
 	// Remove from APISIX upstream if app server
 	if roleLabel == "app" && privateIP != "" {
@@ -640,34 +640,22 @@ func (a *Autoscaler) updatePrometheusConfig(ctx context.Context) error {
 	}
 
 	// Convert to models.Server format for deployer
-	var controlPlanePrivateIP string
-	if len(controlPlane.PrivateNet) > 0 {
-		controlPlanePrivateIP = controlPlane.PrivateNet[0].IP.String()
-	}
 	controlPlaneModel := &models.Server{
 		PublicIP:  controlPlane.PublicNet.IPv4.IP.String(),
-		PrivateIP: controlPlanePrivateIP,
+		PrivateIP: orchestrator.ExtractPrivateIP(controlPlane),
 	}
 
 	var dataPlaneModels []*models.Server
 	for _, dp := range dataPlanes {
-		var privateIP string
-		if len(dp.PrivateNet) > 0 {
-			privateIP = dp.PrivateNet[0].IP.String()
-		}
 		dataPlaneModels = append(dataPlaneModels, &models.Server{
-			PrivateIP: privateIP,
+			PrivateIP: orchestrator.ExtractPrivateIP(dp),
 		})
 	}
 
 	var appServerModels []*models.Server
 	for _, as := range appServers {
-		var privateIP string
-		if len(as.PrivateNet) > 0 {
-			privateIP = as.PrivateNet[0].IP.String()
-		}
 		appServerModels = append(appServerModels, &models.Server{
-			PrivateIP: privateIP,
+			PrivateIP: orchestrator.ExtractPrivateIP(as),
 		})
 	}
 
@@ -701,10 +689,7 @@ func (a *Autoscaler) updateK6Config(ctx context.Context) error {
 	// Build LB_TARGETS comma-separated list
 	var targets []string
 	for _, dp := range dataPlanes {
-		var privateIP string
-		if len(dp.PrivateNet) > 0 {
-			privateIP = dp.PrivateNet[0].IP.String()
-		}
+		privateIP := orchestrator.ExtractPrivateIP(dp)
 		if privateIP != "" {
 			targets = append(targets, fmt.Sprintf("http://%s", privateIP))
 		}
@@ -730,39 +715,8 @@ func (a *Autoscaler) updateK6Config(ctx context.Context) error {
 		a.log("warn", fmt.Sprintf("Failed to remove k6 container (may not exist): %v", err))
 	}
 
-	// Set defaults for k6 config
-	rate := a.config.K6.Rate
-	if rate == 0 {
-		rate = 10
-	}
-	duration := a.config.K6.Duration
-	if duration == "" {
-		duration = "30s"
-	}
-	preallocatedVUs := a.config.K6.PreallocatedVUs
-	if preallocatedVUs == 0 {
-		preallocatedVUs = 10
-	}
-	maxVUs := a.config.K6.MaxVUs
-	if maxVUs == 0 {
-		maxVUs = 100
-	}
-	targetPath := a.config.K6.TargetPath
-	if targetPath == "" {
-		targetPath = "/"
-	}
-	connectionTimeout := a.config.K6.ConnectionTimeout
-	if connectionTimeout == "" {
-		connectionTimeout = "10s"
-	}
-	requestTimeout := a.config.K6.RequestTimeout
-	if requestTimeout == "" {
-		requestTimeout = "30s"
-	}
-	gracefulStop := a.config.K6.GracefulStop
-	if gracefulStop == "" {
-		gracefulStop = "30s"
-	}
+	// Apply defaults for k6 config
+	orchestrator.ApplyK6Defaults(&a.config.K6)
 
 	// Run k6 with updated targets
 	runCmd := fmt.Sprintf(`docker run -d --name k6 \
@@ -781,14 +735,14 @@ func (a *Autoscaler) updateK6Config(ctx context.Context) error {
 		grafana/k6:latest run /scripts/loadtest.js`,
 		networkName,
 		lbTargets,
-		rate,
-		duration,
-		preallocatedVUs,
-		maxVUs,
-		targetPath,
-		connectionTimeout,
-		requestTimeout,
-		gracefulStop)
+		a.config.K6.Rate,
+		a.config.K6.Duration,
+		a.config.K6.PreallocatedVUs,
+		a.config.K6.MaxVUs,
+		a.config.K6.TargetPath,
+		a.config.K6.ConnectionTimeout,
+		a.config.K6.RequestTimeout,
+		a.config.K6.GracefulStop)
 
 	if output, err := a.executeSSHCommand(publicIP, runCmd); err != nil {
 		return fmt.Errorf("failed to start k6 container: %w (output: %s)", err, output)
