@@ -3,10 +3,8 @@ package orchestrator
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/dihmeetree/harbor/internal/config"
-	"github.com/dihmeetree/harbor/internal/database"
 	"github.com/dihmeetree/harbor/internal/hetzner"
 	"github.com/dihmeetree/harbor/pkg/models"
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
@@ -81,8 +79,8 @@ func ApplyK6Defaults(k6 *config.K6Config) {
 	}
 }
 
-// CreateServerWithDatabase creates a server and persists it to database
-func CreateServerWithDatabase(ctx context.Context, client *hetzner.Client, db *database.DB, cfg config.ServerConfig, snapshotID int64, role models.ServerRole, network *hcloud.Network, firewall *hcloud.Firewall, sshKey *hcloud.SSHKey) (*hcloud.Server, error) {
+// CreateServer creates a server in Hetzner Cloud
+func CreateServer(ctx context.Context, client *hetzner.Client, cfg config.ServerConfig, snapshotID int64, role models.ServerRole, network *hcloud.Network, firewall *hcloud.Firewall, sshKey *hcloud.SSHKey) (*hcloud.Server, error) {
 	// Get server type
 	serverType, err := client.GetServerType(ctx, cfg.Type)
 	if err != nil {
@@ -122,44 +120,6 @@ func CreateServerWithDatabase(ctx context.Context, client *hetzner.Client, db *d
 
 	server, err := client.CreateServer(ctx, opts)
 	if err != nil {
-		return nil, err
-	}
-
-	// Get private IP
-	var privateIP string
-	for _, privateNet := range server.PrivateNet {
-		if privateNet.Network.ID == network.ID {
-			privateIP = privateNet.IP.String()
-			break
-		}
-	}
-
-	// Get database network ID
-	netRepo := database.NewNetworkRepository(db)
-	dbNetwork, err := netRepo.GetByHetznerID(network.ID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get network from database: %w", err)
-	}
-	if dbNetwork == nil {
-		return nil, fmt.Errorf("network not found in database")
-	}
-
-	// Save to database
-	serverRepo := database.NewServerRepository(db)
-	dbServer := &models.Server{
-		HetznerID: server.ID,
-		Name:      server.Name,
-		Type:      cfg.Type,
-		Role:      role,
-		PublicIP:  server.PublicNet.IPv4.IP.String(),
-		PrivateIP: privateIP,
-		Location:  cfg.Location,
-		Image:     image.Name, // Flatcar snapshot name
-		Status:    string(server.Status),
-		NetworkID: dbNetwork.ID,
-		CreatedAt: time.Now(),
-	}
-	if err := serverRepo.Create(dbServer); err != nil {
 		return nil, err
 	}
 

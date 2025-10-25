@@ -7,7 +7,6 @@ import (
 
 	"github.com/dihmeetree/harbor/internal/apisix"
 	"github.com/dihmeetree/harbor/internal/config"
-	"github.com/dihmeetree/harbor/internal/database"
 	"github.com/dihmeetree/harbor/internal/hetzner"
 	"github.com/dihmeetree/harbor/internal/ssh"
 	"github.com/dihmeetree/harbor/pkg/models"
@@ -22,13 +21,12 @@ type ManualScaler struct {
 	apisixClient  *apisix.Client
 	deployer      *Deployer
 	sshClient     *ssh.Client
-	db            *database.DB
 }
 
 // NewManualScaler creates a new manual scaler
-func NewManualScaler(cfg *config.Config, hetznerToken string, controlPlaneIP string, apisixKey string, sshKeyPath string, db *database.DB) (*ManualScaler, error) {
+func NewManualScaler(cfg *config.Config, hetznerToken string, controlPlaneIP string, apisixKey string, sshKeyPath string) (*ManualScaler, error) {
 	hetznerClient := hetzner.New(hetznerToken)
-	deployer := NewDeployer(cfg, db, sshKeyPath)
+	deployer := NewDeployer(cfg, hetznerToken, sshKeyPath)
 
 	// Create SSH connection to control plane (Flatcar uses 'core' user)
 	sshClient, err := ssh.New(controlPlaneIP, "core", sshKeyPath)
@@ -47,7 +45,6 @@ func NewManualScaler(cfg *config.Config, hetznerToken string, controlPlaneIP str
 		apisixClient:  apisixClient,
 		deployer:      deployer,
 		sshClient:     sshClient,
-		db:            db,
 	}, nil
 }
 
@@ -89,7 +86,6 @@ func (m *ManualScaler) ScaleUp(ctx context.Context, role string, poolName string
 	}
 
 	startIndex := len(existingHetznerServers) + 1
-	serverRepo := database.NewServerRepository(m.db)
 
 	// Extract base name from control plane server name
 	baseName := m.config.Control.Name
@@ -97,46 +93,25 @@ func (m *ManualScaler) ScaleUp(ctx context.Context, role string, poolName string
 		baseName = baseName[:idx]
 	}
 
-	// Get network from database
-	netRepo := database.NewNetworkRepository(m.db)
-	networks, err := netRepo.GetAll()
+	// Get network from Hetzner by name
+	networkName := m.config.Network.Name
+	network, err := m.hetznerClient.GetNetworkByName(ctx, networkName)
 	if err != nil {
-		return fmt.Errorf("failed to query networks from database: %w", err)
-	}
-	if len(networks) == 0 {
-		return fmt.Errorf("no network found in database - infrastructure may not be properly deployed. Run 'harbor deploy' first")
-	}
-	network, err := m.hetznerClient.GetNetwork(ctx, networks[0].HetznerID)
-	if err != nil {
-		return fmt.Errorf("failed to get network (ID: %d) from Hetzner: %w", networks[0].HetznerID, err)
+		return fmt.Errorf("failed to get network %s from Hetzner: %w", networkName, err)
 	}
 
-	// Get firewall from database
-	fwRepo := database.NewFirewallRepository(m.db)
-	firewalls, err := fwRepo.GetAll()
+	// Get firewall from Hetzner by name
+	firewallName := m.config.Firewall.Name
+	firewall, err := m.hetznerClient.GetFirewallByName(ctx, firewallName)
 	if err != nil {
-		return fmt.Errorf("failed to query firewalls from database: %w", err)
-	}
-	if len(firewalls) == 0 {
-		return fmt.Errorf("no firewall found in database - infrastructure may not be properly deployed. Run 'harbor deploy' first")
-	}
-	firewall, err := m.hetznerClient.GetFirewall(ctx, firewalls[0].HetznerID)
-	if err != nil {
-		return fmt.Errorf("failed to get firewall (ID: %d) from Hetzner: %w", firewalls[0].HetznerID, err)
+		return fmt.Errorf("failed to get firewall %s from Hetzner: %w", firewallName, err)
 	}
 
-	// Get SSH key from database
-	sshKeyRepo := database.NewSSHKeyRepository(m.db)
-	sshKeys, err := sshKeyRepo.GetAll()
+	// Get SSH key from Hetzner by name
+	keyName := fmt.Sprintf("%s-key", m.config.Control.Name)
+	sshKey, err := m.hetznerClient.GetSSHKeyByName(ctx, keyName)
 	if err != nil {
-		return fmt.Errorf("failed to query SSH keys from database: %w", err)
-	}
-	if len(sshKeys) == 0 {
-		return fmt.Errorf("no SSH key found in database - infrastructure may not be properly deployed. Run 'harbor deploy' first")
-	}
-	sshKey, err := m.hetznerClient.GetSSHKey(ctx, sshKeys[0].HetznerID)
-	if err != nil {
-		return fmt.Errorf("failed to get SSH key (ID: %d) from Hetzner: %w", sshKeys[0].HetznerID, err)
+		return fmt.Errorf("failed to get SSH key %s from Hetzner: %w", keyName, err)
 	}
 
 	// Create servers and track them
@@ -165,51 +140,41 @@ func (m *ManualScaler) ScaleUp(ctx context.Context, role string, poolName string
 			return fmt.Errorf("failed to create server: %w", err)
 		}
 
-		// Get the database entry for this server
-		dbServers, err := serverRepo.GetByRole(dbRole)
-		if err != nil {
-			return fmt.Errorf("failed to get server from database: %w", err)
-		}
-
-		// Find the newly created server in database
-		for _, dbServer := range dbServers {
-			if dbServer.HetznerID == server.ID {
-				newServers = append(newServers, dbServer)
-				break
-			}
-		}
+		// Convert to models.Server
+		newServers = append(newServers, HcloudToModels(server))
 
 		fmt.Printf("[info] %s server created: %s (%s)\n", poolName, server.Name, server.PublicNet.IPv4.IP.String())
 	}
 
 	// Install Docker on new servers
 	fmt.Printf("[info] Waiting for %d new server(s) to be ready...\n", len(newServers))
-	if err := m.deployer.InstallDocker(0, newServers); err != nil {
+	if err := m.deployer.InstallDocker(newServers); err != nil {
 		return fmt.Errorf("failed to install Docker: %w", err)
 	}
 
 	// Deploy services to new servers based on role
 	fmt.Printf("[info] Deploying %d %s server(s)\n", len(newServers), poolName)
 
-	// Get control plane IP for data planes
-	controlPlanes, err := serverRepo.GetByRole(models.RoleControlPlane)
+	// Get control plane IP from Hetzner
+	controlPlanes, err := m.hetznerClient.GetServersByLabel(ctx, "role", "control")
 	if err != nil {
-		return fmt.Errorf("failed to get control plane from database: %w", err)
+		return fmt.Errorf("failed to get control plane from Hetzner: %w", err)
 	}
 	if len(controlPlanes) == 0 {
-		return fmt.Errorf("no control plane found in database - infrastructure may not be properly deployed")
+		return fmt.Errorf("no control plane found in Hetzner - infrastructure may not be properly deployed")
 	}
-	controlPlaneIP := controlPlanes[0].PrivateIP
+	controlPlane := HcloudToModels(controlPlanes[0])
+	controlPlaneIP := controlPlane.PrivateIP
 
 	for _, server := range newServers {
 		switch role {
 		case "lb":
-			if err := m.deployer.DeployDataPlane(0, server, controlPlaneIP); err != nil {
+			if err := m.deployer.DeployDataPlane(server, controlPlaneIP); err != nil {
 				return fmt.Errorf("failed to deploy data plane on %s: %w", server.Name, err)
 			}
 			fmt.Printf("[info] ✓ Data plane deployed on %s\n", server.Name)
 		case "app":
-			if err := m.deployer.DeployAppServer(0, server); err != nil {
+			if err := m.deployer.DeployAppServer(server); err != nil {
 				return fmt.Errorf("failed to deploy app server %s: %w", server.Name, err)
 			}
 			fmt.Printf("[info] ✓ App deployed on %s\n", server.Name)
@@ -229,7 +194,7 @@ func (m *ManualScaler) ScaleUp(ctx context.Context, role string, poolName string
 		// Convert to models.Server format for UpdateAPISIXUpstreams
 		allAppServers := HcloudListToModels(hetznerServers)
 
-		if err := m.deployer.UpdateAPISIXUpstreams(0, controlPlanes[0], allAppServers); err != nil {
+		if err := m.deployer.UpdateAPISIXUpstreams(controlPlane, allAppServers); err != nil {
 			return fmt.Errorf("failed to update APISIX upstreams: %w", err)
 		}
 	}
@@ -252,7 +217,7 @@ func (m *ManualScaler) ScaleUp(ctx context.Context, role string, poolName string
 	dataPlanes := HcloudListToModels(allDataPlanes)
 	appServers := HcloudListToModels(allAppServers)
 
-	if err := m.deployer.UpdatePrometheusConfig(0, controlPlanes[0], dataPlanes, appServers); err != nil {
+	if err := m.deployer.UpdatePrometheusConfig(controlPlane, dataPlanes, appServers); err != nil {
 		return fmt.Errorf("failed to update Prometheus configuration: %w", err)
 	}
 
@@ -273,7 +238,7 @@ func (m *ManualScaler) ScaleUp(ctx context.Context, role string, poolName string
 
 // createServerViaHetzner creates a server using the hetzner client
 func (m *ManualScaler) createServerViaHetzner(ctx context.Context, cfg config.ServerConfig, role models.ServerRole, network *hcloud.Network, firewall *hcloud.Firewall, sshKey *hcloud.SSHKey) (*hcloud.Server, error) {
-	return CreateServerWithDatabase(ctx, m.hetznerClient, m.db, cfg, m.config.SnapshotID, role, network, firewall, sshKey)
+	return CreateServer(ctx, m.hetznerClient, cfg, m.config.SnapshotID, role, network, firewall, sshKey)
 }
 
 // ScaleDown removes the specified number of servers
@@ -297,19 +262,6 @@ func (m *ManualScaler) ScaleDown(ctx context.Context, role string, poolName stri
 		}
 	}
 
-	// Determine database role for the given label
-	var dbRole models.ServerRole
-	switch role {
-	case "lb":
-		dbRole = models.RoleDataPlane
-	case "app":
-		dbRole = models.RoleApp
-	default:
-		return fmt.Errorf("unsupported role: %s", role)
-	}
-
-	serverRepo := database.NewServerRepository(m.db)
-
 	fmt.Printf("[info] Removing %d %s server(s) (%d -> %d)\n", count, poolName, currentCount, currentCount-count)
 
 	// Remove the newest servers first (highest Hetzner IDs)
@@ -327,26 +279,6 @@ func (m *ManualScaler) ScaleDown(ctx context.Context, role string, poolName stri
 			return fmt.Errorf("failed to delete server %s from Hetzner: %w", serverToRemove.Name, err)
 		}
 
-		// Try to delete from database if it exists (using correct role)
-		dbServers, err := serverRepo.GetByRole(dbRole)
-		if err != nil {
-			fmt.Printf("[warn] Failed to query database for server cleanup: %v\n", err)
-		} else {
-			found := false
-			for _, dbSrv := range dbServers {
-				if dbSrv.HetznerID == serverToRemove.ID {
-					if err := serverRepo.Delete(dbSrv.ID); err != nil {
-						fmt.Printf("[warn] Failed to delete server %s from database: %v\n", serverToRemove.Name, err)
-					}
-					found = true
-					break
-				}
-			}
-			if !found {
-				fmt.Printf("[info] Server %s not found in database (may have been created by autoscaler)\n", serverToRemove.Name)
-			}
-		}
-
 		fmt.Printf("[info] ✓ Server %s removed from Hetzner\n", serverToRemove.Name)
 
 		// Remove from servers list for next iteration
@@ -359,14 +291,15 @@ func (m *ManualScaler) ScaleDown(ctx context.Context, role string, poolName stri
 		hetznerServers = newServers
 	}
 
-	// Get control plane from database
-	controlPlanes, err := serverRepo.GetByRole(models.RoleControlPlane)
+	// Get control plane from Hetzner
+	hetznerControlPlanes, err := m.hetznerClient.GetServersByLabel(ctx, "role", "control")
 	if err != nil {
-		return fmt.Errorf("failed to get control plane from database: %w", err)
+		return fmt.Errorf("failed to get control plane from Hetzner: %w", err)
 	}
-	if len(controlPlanes) == 0 {
-		return fmt.Errorf("no control plane found in database")
+	if len(hetznerControlPlanes) == 0 {
+		return fmt.Errorf("no control plane found in Hetzner")
 	}
+	controlPlane := HcloudToModels(hetznerControlPlanes[0])
 
 	// Update configurations based on role
 	if role == "app" {
@@ -381,7 +314,7 @@ func (m *ManualScaler) ScaleDown(ctx context.Context, role string, poolName stri
 		// Convert to models.Server format for UpdateAPISIXUpstreams
 		remainingAppServers := HcloudListToModels(hetznerServers)
 
-		if err := m.deployer.UpdateAPISIXUpstreams(0, controlPlanes[0], remainingAppServers); err != nil {
+		if err := m.deployer.UpdateAPISIXUpstreams(controlPlane, remainingAppServers); err != nil {
 			return fmt.Errorf("failed to update APISIX upstreams: %w", err)
 		}
 	}
@@ -404,7 +337,7 @@ func (m *ManualScaler) ScaleDown(ctx context.Context, role string, poolName stri
 	dataPlanes := HcloudListToModels(allDataPlanes)
 	appServers := HcloudListToModels(allAppServers)
 
-	if err := m.deployer.UpdatePrometheusConfig(0, controlPlanes[0], dataPlanes, appServers); err != nil {
+	if err := m.deployer.UpdatePrometheusConfig(controlPlane, dataPlanes, appServers); err != nil {
 		return fmt.Errorf("failed to update Prometheus configuration: %w", err)
 	}
 

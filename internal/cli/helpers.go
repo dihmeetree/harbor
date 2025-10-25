@@ -6,26 +6,16 @@ import (
 	"path/filepath"
 
 	"github.com/dihmeetree/harbor/internal/config"
-	"github.com/dihmeetree/harbor/internal/database"
 )
 
 // CommandContext holds common initialization for commands
 type CommandContext struct {
 	Config *config.Config
-	DB     *database.DB
 	Token  string
 }
 
-// Close closes the database connection
-func (ctx *CommandContext) Close() error {
-	if ctx.DB != nil {
-		return ctx.DB.Close()
-	}
-	return nil
-}
-
-// InitCommandContext loads config, validates token, opens database
-func InitCommandContext(cfgFile, dbPath string) (*CommandContext, error) {
+// InitCommandContext loads config and validates token
+func InitCommandContext(cfgFile string) (*CommandContext, error) {
 	// Load config
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
@@ -38,21 +28,8 @@ func InitCommandContext(cfgFile, dbPath string) (*CommandContext, error) {
 		return nil, fmt.Errorf("HETZNER_API_TOKEN environment variable is required")
 	}
 
-	// Ensure database directory exists
-	dbDir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dbDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create database directory: %w", err)
-	}
-
-	// Open database
-	db, err := database.New(dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
-	}
-
 	return &CommandContext{
 		Config: cfg,
-		DB:     db,
 		Token:  token,
 	}, nil
 }

@@ -13,7 +13,7 @@ Harbor is a CLI tool for provisioning and managing APISIX-based infrastructure o
 - **Full Observability**: Built-in Prometheus, cAdvisor, and node-exporter for comprehensive monitoring
 - **Private Networking**: All inter-server communication over secure Hetzner private network
 - **Auto-scaling**: Automatic horizontal scaling based on CPU/memory metrics
-- **State Management**: Local SQLite database tracks all infrastructure state
+- **Stateless Design**: All infrastructure state managed via Hetzner Cloud API with server labels
 - **SSH Key Management**: Auto-generates SSH keys or uses your existing ones
 
 ## Architecture
@@ -219,9 +219,12 @@ apisix:
     ssl_protocols: ["TLSv1.2", "TLSv1.3"]
 
 monitoring:
-  prometheus_port: 9090
-  cadvisor_port: 8080
-  node_exporter_port: 9100
+  prometheus:
+    port: 9090
+  cadvisor:
+    port: 8080
+  node_exporter:
+    port: 9100
 
 autoscaler:
   enabled: true
@@ -326,11 +329,11 @@ harbor/
 ├── cmd/cli/              # CLI entrypoint
 ├── internal/
 │   ├── config/           # Configuration parsing
-│   ├── database/         # SQLite state management
 │   ├── hetzner/          # Hetzner Cloud API client
 │   ├── ssh/              # SSH connection manager
 │   ├── docker/           # Docker installation
 │   ├── apisix/           # APISIX Admin API client
+│   ├── autoscaler/       # Automatic horizontal scaling
 │   └── orchestrator/     # Deployment orchestration
 ├── pkg/models/           # Data models
 └── configs/              # Configuration templates
@@ -367,18 +370,6 @@ See `CLAUDE.md` for detailed development guidelines including:
 - Testing requirements
 - Commit message format
 - Pre-commit checks
-
-## State Management
-
-Harbor stores all infrastructure state in `~/.harbor/state.db` (SQLite):
-
-- Server IDs, names, IPs, and status
-- Network and subnet configuration
-- Firewall rules
-- SSH keys
-- Deployment history and logs
-
-**Important**: Back up this database regularly! You need it to manage and destroy your infrastructure.
 
 ## SSH Key Management
 

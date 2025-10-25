@@ -10,33 +10,28 @@ import (
 
 	"github.com/dihmeetree/harbor/internal/apisix"
 	"github.com/dihmeetree/harbor/internal/config"
-	"github.com/dihmeetree/harbor/internal/database"
 	"github.com/dihmeetree/harbor/internal/docker"
+	"github.com/dihmeetree/harbor/internal/hetzner"
 	"github.com/dihmeetree/harbor/internal/ssh"
 	"github.com/dihmeetree/harbor/pkg/models"
-	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 )
 
 // Deployer handles service deployment to servers
 type Deployer struct {
 	config         *config.Config
-	db             *database.DB
-	serverRepo     *database.ServerRepository
-	deployRepo     *database.DeploymentRepository
+	hetzner        *hetzner.Client
 	dockerClient   *docker.Installer
 	privateKeyPath string
 	sshUser        string // SSH username for connecting to servers
 }
 
 // NewDeployer creates a new Deployer instance for managing service deployments.
-// The deployer uses the provided configuration, database connection, and SSH private key
+// The deployer uses the provided configuration, Hetzner API token, and SSH private key
 // to deploy and manage services across the infrastructure.
-func NewDeployer(cfg *config.Config, db *database.DB, privateKeyPath string) *Deployer {
+func NewDeployer(cfg *config.Config, hetznerToken string, privateKeyPath string) *Deployer {
 	return &Deployer{
 		config:         cfg,
-		db:             db,
-		serverRepo:     database.NewServerRepository(db),
-		deployRepo:     database.NewDeploymentRepository(db),
+		hetzner:        hetzner.New(hetznerToken),
 		dockerClient:   docker.New(),
 		privateKeyPath: privateKeyPath,
 		sshUser:        "core", // Flatcar Linux SSH user
@@ -48,51 +43,30 @@ func NewDeployer(cfg *config.Config, db *database.DB, privateKeyPath string) *De
 // (control plane, data planes, app servers) with the latest configuration from harbor.yaml.
 // This is useful for updating service configuration, restarting services, or recovering from failures.
 func (d *Deployer) DeployServicesOnly(ctx context.Context) error {
-	// Create a new deployment entry
-	deployment := &models.Deployment{
-		Status:    "in_progress",
-		StartedAt: time.Now(),
-	}
-
-	if err := d.deployRepo.Create(deployment); err != nil {
-		return fmt.Errorf("failed to create deployment: %w", err)
-	}
-
-	deploymentID := deployment.ID
-	d.log(deploymentID, "info", "Starting service redeployment")
-
-	// Query Hetzner API directly for current servers (ignore local database)
-	// This ensures we only redeploy to servers that actually exist
-	hetznerToken := os.Getenv("HETZNER_API_TOKEN")
-	if hetznerToken == "" {
-		_ = d.deployRepo.UpdateStatus(deploymentID, "failed")
-		return fmt.Errorf("HETZNER_API_TOKEN environment variable is required")
-	}
+	d.log("info", "Starting service redeployment")
 
 	// Get servers from Hetzner by role labels
-	d.log(deploymentID, "info", "Querying Hetzner API for current servers...")
+	d.log("info", "Querying Hetzner API for current servers...")
 
-	controlPlanes, dataPlanes, appServers, err := d.getServersFromHetzner(ctx, hetznerToken)
+	controlPlanes, dataPlanes, appServers, err := d.getServersFromHetzner(ctx)
 	if err != nil {
-		_ = d.deployRepo.UpdateStatus(deploymentID, "failed")
 		return fmt.Errorf("failed to get servers from Hetzner: %w", err)
 	}
 
 	if len(controlPlanes) == 0 {
-		_ = d.deployRepo.UpdateStatus(deploymentID, "failed")
 		return fmt.Errorf("no control plane server found in Hetzner")
 	}
 
 	controlPlane := controlPlanes[0]
-	d.log(deploymentID, "info", fmt.Sprintf("Found: 1 control plane, %d data planes, %d app servers", len(dataPlanes), len(appServers)))
+	d.log("info", fmt.Sprintf("Found: 1 control plane, %d data planes, %d app servers", len(dataPlanes), len(appServers)))
 
 	// Stop and remove existing containers on all servers
-	d.log(deploymentID, "info", "Stopping existing containers...")
+	d.log("info", "Stopping existing containers...")
 	allServers := append(append(controlPlanes, dataPlanes...), appServers...)
 	for _, server := range allServers {
 		sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
 		if err != nil {
-			d.log(deploymentID, "warn", fmt.Sprintf("Failed to connect to %s: %v", server.Name, err))
+			d.log("warn", fmt.Sprintf("Failed to connect to %s: %v", server.Name, err))
 			continue
 		}
 		// Stop containers and remove volumes
@@ -101,22 +75,20 @@ func (d *Deployer) DeployServicesOnly(ctx context.Context) error {
 	}
 
 	// Deploy control plane (pass data planes for k6 target configuration)
-	d.log(deploymentID, "info", "Deploying control plane services")
-	if err := d.DeployControlPlaneWithServers(deploymentID, controlPlane, dataPlanes, appServers); err != nil {
-		_ = d.deployRepo.UpdateStatus(deploymentID, "failed")
+	d.log("info", "Deploying control plane services")
+	if err := d.DeployControlPlaneWithServers(controlPlane, dataPlanes, appServers); err != nil {
 		return fmt.Errorf("failed to deploy control plane: %w", err)
 	}
 
 	// Wait for control plane to be ready
-	d.log(deploymentID, "info", "Waiting for control plane to be ready...")
-	if err := d.waitForControlPlane(deploymentID, controlPlane); err != nil {
-		_ = d.deployRepo.UpdateStatus(deploymentID, "failed")
+	d.log("info", "Waiting for control plane to be ready...")
+	if err := d.waitForControlPlane(controlPlane); err != nil {
 		return fmt.Errorf("control plane failed to become ready: %w", err)
 	}
-	d.log(deploymentID, "info", "✓ Control plane is ready")
+	d.log("info", "✓ Control plane is ready")
 
 	// Deploy data planes in parallel
-	d.log(deploymentID, "info", fmt.Sprintf("Deploying %d data planes in parallel", len(dataPlanes)))
+	d.log("info", fmt.Sprintf("Deploying %d data planes in parallel", len(dataPlanes)))
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(dataPlanes)+len(appServers))
 
@@ -124,27 +96,27 @@ func (d *Deployer) DeployServicesOnly(ctx context.Context) error {
 		wg.Add(1)
 		go func(srv *models.Server) {
 			defer wg.Done()
-			d.log(deploymentID, "info", fmt.Sprintf("Deploying data plane on %s", srv.Name))
-			if err := d.DeployDataPlane(deploymentID, srv, controlPlane.PrivateIP); err != nil {
+			d.log("info", fmt.Sprintf("Deploying data plane on %s", srv.Name))
+			if err := d.DeployDataPlane(srv, controlPlane.PrivateIP); err != nil {
 				errChan <- fmt.Errorf("failed to deploy data plane on %s: %w", srv.Name, err)
 				return
 			}
-			d.log(deploymentID, "info", fmt.Sprintf("✓ Data plane deployed on %s", srv.Name))
+			d.log("info", fmt.Sprintf("✓ Data plane deployed on %s", srv.Name))
 		}(server)
 	}
 
 	// Deploy app servers in parallel
-	d.log(deploymentID, "info", fmt.Sprintf("Deploying %d app servers in parallel", len(appServers)))
+	d.log("info", fmt.Sprintf("Deploying %d app servers in parallel", len(appServers)))
 	for _, server := range appServers {
 		wg.Add(1)
 		go func(srv *models.Server) {
 			defer wg.Done()
-			d.log(deploymentID, "info", fmt.Sprintf("Deploying app on %s", srv.Name))
-			if err := d.DeployAppServer(deploymentID, srv); err != nil {
+			d.log("info", fmt.Sprintf("Deploying app on %s", srv.Name))
+			if err := d.DeployAppServer(srv); err != nil {
 				errChan <- fmt.Errorf("failed to deploy app on %s: %w", srv.Name, err)
 				return
 			}
-			d.log(deploymentID, "info", fmt.Sprintf("✓ App deployed on %s", srv.Name))
+			d.log("info", fmt.Sprintf("✓ App deployed on %s", srv.Name))
 		}(server)
 	}
 
@@ -159,27 +131,108 @@ func (d *Deployer) DeployServicesOnly(ctx context.Context) error {
 	}
 
 	if len(errors) > 0 {
-		_ = d.deployRepo.UpdateStatus(deploymentID, "failed")
 		return errors[0]
 	}
 
 	// Wait for data plane services to be ready
-	d.log(deploymentID, "info", "Waiting for data plane services to be ready...")
-	if err := d.waitForDataPlanes(deploymentID, dataPlanes); err != nil {
-		_ = d.deployRepo.UpdateStatus(deploymentID, "failed")
+	d.log("info", "Waiting for data plane services to be ready...")
+	if err := d.waitForDataPlanes(dataPlanes); err != nil {
 		return fmt.Errorf("data planes failed to become ready: %w", err)
 	}
-	d.log(deploymentID, "info", "✓ All data planes are ready")
+	d.log("info", "✓ All data planes are ready")
 
 	// Configure APISIX
-	d.log(deploymentID, "info", "Configuring APISIX")
-	if err := d.ConfigureAPISIX(deploymentID, controlPlane, appServers); err != nil {
-		_ = d.deployRepo.UpdateStatus(deploymentID, "failed")
+	d.log("info", "Configuring APISIX")
+	if err := d.ConfigureAPISIX(controlPlane, appServers); err != nil {
 		return fmt.Errorf("failed to configure APISIX: %w", err)
 	}
 
-	d.log(deploymentID, "info", "Service redeployment completed successfully")
-	_ = d.deployRepo.UpdateStatus(deploymentID, "completed")
+	d.log("info", "Service redeployment completed successfully")
+	return nil
+}
+
+// RedeployAppServers redeploys only the app servers by stopping containers and redeploying with docker-compose.
+// This performs a rolling deployment (one server at a time) to ensure zero downtime.
+func (d *Deployer) RedeployAppServers(ctx context.Context) error {
+	d.log("info", "Starting zero-downtime app server redeployment")
+
+	// Get servers from Hetzner
+	d.log("info", "Querying Hetzner API for app servers...")
+	controlPlanes, _, appServers, err := d.getServersFromHetzner(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get servers from Hetzner: %w", err)
+	}
+
+	if len(appServers) == 0 {
+		return fmt.Errorf("no app servers found in Hetzner")
+	}
+
+	if len(controlPlanes) == 0 {
+		return fmt.Errorf("no control plane server found in Hetzner")
+	}
+
+	controlPlane := controlPlanes[0]
+	d.log("info", fmt.Sprintf("Found %d app server(s) to redeploy (rolling deployment)", len(appServers)))
+
+	// Log the compose file being used
+	if d.config.App.ComposeFile != "" {
+		d.log("info", fmt.Sprintf("Using docker-compose file: %s", d.config.App.ComposeFile))
+	}
+
+	// Deploy app servers one at a time (rolling deployment for zero downtime)
+	for i, server := range appServers {
+		d.log("info", fmt.Sprintf("[%d/%d] Redeploying %s", i+1, len(appServers), server.Name))
+
+		// Remove this server from APISIX upstreams (so no traffic is routed to it)
+		d.log("info", fmt.Sprintf("  Removing %s from APISIX upstreams", server.Name))
+		remainingServers := make([]*models.Server, 0, len(appServers)-1)
+		for _, s := range appServers {
+			if s.Name != server.Name {
+				remainingServers = append(remainingServers, s)
+			}
+		}
+		if err := d.updateAPISIXUpstreamsWithServers(controlPlane, remainingServers); err != nil {
+			return fmt.Errorf("failed to remove %s from upstreams: %w", server.Name, err)
+		}
+
+		// Wait a moment for connections to drain
+		time.Sleep(2 * time.Second)
+
+		// Connect to server
+		sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
+		if err != nil {
+			return fmt.Errorf("failed to connect to %s: %w", server.Name, err)
+		}
+
+		// Stop containers on this server
+		d.log("info", fmt.Sprintf("  Stopping containers on %s", server.Name))
+		_, _ = sshClient.Execute("cd /var/lib/harbor && docker compose down -v 2>/dev/null || true")
+		_, _ = sshClient.Execute("docker stop $(docker ps -q) 2>/dev/null || true")
+		sshClient.Close()
+
+		// Deploy to this server
+		d.log("info", fmt.Sprintf("  Deploying new version to %s", server.Name))
+		if err := d.DeployAppServer(server); err != nil {
+			return fmt.Errorf("failed to deploy app on %s: %w", server.Name, err)
+		}
+
+		// Wait for health check before moving to next server
+		d.log("info", fmt.Sprintf("  Waiting for %s to be healthy...", server.Name))
+		if err := d.waitForServerHealth(server); err != nil {
+			return fmt.Errorf("server %s failed health check: %w", server.Name, err)
+		}
+
+		// Add this server back to APISIX upstreams
+		d.log("info", fmt.Sprintf("  Adding %s back to APISIX upstreams", server.Name))
+		// Include all servers up to and including the current one (all previously deployed + current)
+		deployedServers := appServers[:i+1]
+		if err := d.updateAPISIXUpstreamsWithServers(controlPlane, deployedServers); err != nil {
+			return fmt.Errorf("failed to add %s back to upstreams: %w", server.Name, err)
+		}
+
+		d.log("info", fmt.Sprintf("✓ %s redeployed successfully", server.Name))
+	}
+
 	return nil
 }
 
@@ -188,54 +241,51 @@ func (d *Deployer) DeployServicesOnly(ctx context.Context) error {
 // installs Docker on all servers, deploys the control plane, and then deploys data planes
 // and app servers in parallel. Finally, it configures APISIX routes and upstreams.
 // This method is typically called after Provision() creates the infrastructure.
-func (d *Deployer) Deploy(ctx context.Context, deploymentID int64) error {
-	d.log(deploymentID, "info", "Starting service deployment")
+func (d *Deployer) Deploy(ctx context.Context) error {
+	d.log("info", "Starting service deployment")
 
-	// Get all servers
-	servers, err := d.serverRepo.GetAll()
+	// Get servers from Hetzner
+	controlPlanes, dataPlanes, appServers, err := d.getServersFromHetzner(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get servers: %w", err)
+		return fmt.Errorf("failed to get servers from Hetzner: %w", err)
 	}
-
-	// Wait for servers to be ready (SSH accessible)
-	d.log(deploymentID, "info", "Waiting for all servers to be SSH accessible...")
-	if err := d.waitForServersReady(deploymentID, servers); err != nil {
-		return fmt.Errorf("servers failed to become ready: %w", err)
-	}
-	d.log(deploymentID, "info", "✓ All servers are SSH accessible")
-
-	// Install docker-compose on all servers in parallel
-	d.log(deploymentID, "info", "Installing docker-compose on all servers")
-	if err := d.InstallDocker(deploymentID, servers); err != nil {
-		return fmt.Errorf("failed to install docker-compose: %w", err)
-	}
-
-	// Get server groups
-	controlPlanes, _ := d.serverRepo.GetByRole(models.RoleControlPlane)
-	dataPlanes, _ := d.serverRepo.GetByRole(models.RoleDataPlane)
-	appServers, _ := d.serverRepo.GetByRole(models.RoleApp)
 
 	if len(controlPlanes) == 0 {
 		return fmt.Errorf("no control plane server found")
 	}
 
+	allServers := append(append(controlPlanes, dataPlanes...), appServers...)
+
+	// Wait for servers to be ready (SSH accessible)
+	d.log("info", "Waiting for all servers to be SSH accessible...")
+	if err := d.waitForServersReady(allServers); err != nil {
+		return fmt.Errorf("servers failed to become ready: %w", err)
+	}
+	d.log("info", "✓ All servers are SSH accessible")
+
+	// Install docker-compose on all servers in parallel
+	d.log("info", "Installing docker-compose on all servers")
+	if err := d.InstallDocker(allServers); err != nil {
+		return fmt.Errorf("failed to install docker-compose: %w", err)
+	}
+
 	controlPlane := controlPlanes[0]
 
 	// Deploy control plane
-	d.log(deploymentID, "info", "Deploying control plane services")
-	if err := d.DeployControlPlane(deploymentID, controlPlane); err != nil {
+	d.log("info", "Deploying control plane services")
+	if err := d.DeployControlPlane(controlPlane); err != nil {
 		return fmt.Errorf("failed to deploy control plane: %w", err)
 	}
 
 	// Wait for control plane to be ready
-	d.log(deploymentID, "info", "Waiting for control plane to be ready...")
-	if err := d.waitForControlPlane(deploymentID, controlPlane); err != nil {
+	d.log("info", "Waiting for control plane to be ready...")
+	if err := d.waitForControlPlane(controlPlane); err != nil {
 		return fmt.Errorf("control plane failed to become ready: %w", err)
 	}
-	d.log(deploymentID, "info", "✓ Control plane is ready")
+	d.log("info", "✓ Control plane is ready")
 
 	// Deploy data planes in parallel
-	d.log(deploymentID, "info", fmt.Sprintf("Deploying %d data planes in parallel", len(dataPlanes)))
+	d.log("info", fmt.Sprintf("Deploying %d data planes in parallel", len(dataPlanes)))
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(dataPlanes)+len(appServers))
 
@@ -243,27 +293,27 @@ func (d *Deployer) Deploy(ctx context.Context, deploymentID int64) error {
 		wg.Add(1)
 		go func(srv *models.Server) {
 			defer wg.Done()
-			d.log(deploymentID, "info", fmt.Sprintf("Deploying data plane on %s", srv.Name))
-			if err := d.DeployDataPlane(deploymentID, srv, controlPlane.PrivateIP); err != nil {
+			d.log("info", fmt.Sprintf("Deploying data plane on %s", srv.Name))
+			if err := d.DeployDataPlane(srv, controlPlane.PrivateIP); err != nil {
 				errChan <- fmt.Errorf("failed to deploy data plane on %s: %w", srv.Name, err)
 				return
 			}
-			d.log(deploymentID, "info", fmt.Sprintf("✓ Data plane deployed on %s", srv.Name))
+			d.log("info", fmt.Sprintf("✓ Data plane deployed on %s", srv.Name))
 		}(server)
 	}
 
 	// Deploy app servers in parallel
-	d.log(deploymentID, "info", fmt.Sprintf("Deploying %d app servers in parallel", len(appServers)))
+	d.log("info", fmt.Sprintf("Deploying %d app servers in parallel", len(appServers)))
 	for _, server := range appServers {
 		wg.Add(1)
 		go func(srv *models.Server) {
 			defer wg.Done()
-			d.log(deploymentID, "info", fmt.Sprintf("Deploying app on %s", srv.Name))
-			if err := d.DeployAppServer(deploymentID, srv); err != nil {
+			d.log("info", fmt.Sprintf("Deploying app on %s", srv.Name))
+			if err := d.DeployAppServer(srv); err != nil {
 				errChan <- fmt.Errorf("failed to deploy app on %s: %w", srv.Name, err)
 				return
 			}
-			d.log(deploymentID, "info", fmt.Sprintf("✓ App deployed on %s", srv.Name))
+			d.log("info", fmt.Sprintf("✓ App deployed on %s", srv.Name))
 		}(server)
 	}
 
@@ -282,26 +332,26 @@ func (d *Deployer) Deploy(ctx context.Context, deploymentID int64) error {
 	}
 
 	// Wait for data plane services to be ready
-	d.log(deploymentID, "info", "Waiting for data plane services to be ready...")
-	if err := d.waitForDataPlanes(deploymentID, dataPlanes); err != nil {
+	d.log("info", "Waiting for data plane services to be ready...")
+	if err := d.waitForDataPlanes(dataPlanes); err != nil {
 		return fmt.Errorf("data planes failed to become ready: %w", err)
 	}
-	d.log(deploymentID, "info", "✓ All data planes are ready")
+	d.log("info", "✓ All data planes are ready")
 
 	// Configure APISIX
-	d.log(deploymentID, "info", "Configuring APISIX")
-	if err := d.ConfigureAPISIX(deploymentID, controlPlane, appServers); err != nil {
+	d.log("info", "Configuring APISIX")
+	if err := d.ConfigureAPISIX(controlPlane, appServers); err != nil {
 		return fmt.Errorf("failed to configure APISIX: %w", err)
 	}
 
-	d.log(deploymentID, "info", "Service deployment completed successfully")
+	d.log("info", "Service deployment completed successfully")
 	return nil
 }
 
 // InstallDocker installs Docker and docker-compose on the specified servers in parallel.
 // It uses SSH to remotely execute the Docker installation script on Flatcar Linux servers.
 // All installations run concurrently with error aggregation via error channel.
-func (d *Deployer) InstallDocker(deploymentID int64, servers []*models.Server) error {
+func (d *Deployer) InstallDocker(servers []*models.Server) error {
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(servers))
 
@@ -310,7 +360,7 @@ func (d *Deployer) InstallDocker(deploymentID int64, servers []*models.Server) e
 		go func(srv *models.Server) {
 			defer wg.Done()
 
-			d.log(deploymentID, "info", fmt.Sprintf("Waiting for SSH on %s (%s)", srv.Name, srv.PublicIP))
+			d.log("info", fmt.Sprintf("Waiting for SSH on %s (%s)", srv.Name, srv.PublicIP))
 
 			sshClient, err := ssh.WaitForConnection(srv.PublicIP, d.sshUser, d.privateKeyPath, 5*time.Minute)
 			if err != nil {
@@ -319,20 +369,15 @@ func (d *Deployer) InstallDocker(deploymentID int64, servers []*models.Server) e
 			}
 			defer sshClient.Close()
 
-			d.log(deploymentID, "info", fmt.Sprintf("✓ SSH ready on %s", srv.Name))
+			d.log("info", fmt.Sprintf("✓ SSH ready on %s", srv.Name))
 
-			// Update server status to running
-			if err := d.serverRepo.UpdateStatus(srv.ID, "running"); err != nil {
-				d.log(deploymentID, "warn", fmt.Sprintf("Failed to update status for %s: %v", srv.Name, err))
-			}
-
-			d.log(deploymentID, "info", fmt.Sprintf("Installing docker-compose on %s", srv.Name))
+			d.log("info", fmt.Sprintf("Installing docker-compose on %s", srv.Name))
 			if err := d.dockerClient.Install(sshClient); err != nil {
 				errChan <- fmt.Errorf("failed to install docker-compose on %s: %w", srv.Name, err)
 				return
 			}
 
-			d.log(deploymentID, "info", fmt.Sprintf("✓ docker-compose ready on %s", srv.Name))
+			d.log("info", fmt.Sprintf("✓ docker-compose ready on %s", srv.Name))
 		}(server)
 	}
 
@@ -351,24 +396,27 @@ func (d *Deployer) InstallDocker(deploymentID int64, servers []*models.Server) e
 		return errors[0]
 	}
 
-	d.log(deploymentID, "info", "✓ docker-compose ready on all servers")
+	d.log("info", "✓ docker-compose ready on all servers")
 	return nil
 }
 
 // DeployControlPlane deploys all control plane services to the control plane server.
-// It queries the database for current data planes and app servers to configure k6 targets.
+// It queries Hetzner for current data planes and app servers to configure k6 targets.
 // This is a convenience wrapper around DeployControlPlaneWithServers.
-func (d *Deployer) DeployControlPlane(deploymentID int64, server *models.Server) error {
-	// Get servers from database
-	dataPlanes, _ := d.serverRepo.GetByRole(models.RoleDataPlane)
-	appServers, _ := d.serverRepo.GetByRole(models.RoleApp)
-	return d.DeployControlPlaneWithServers(deploymentID, server, dataPlanes, appServers)
+func (d *Deployer) DeployControlPlane(server *models.Server) error {
+	// Get servers from Hetzner
+	ctx := context.Background()
+	_, dataPlanes, appServers, err := d.getServersFromHetzner(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get servers from Hetzner: %w", err)
+	}
+	return d.DeployControlPlaneWithServers(server, dataPlanes, appServers)
 }
 
 // DeployControlPlaneWithServers deploys the complete control plane stack including APISIX,
 // etcd, Prometheus, Grafana, autoscaler, and k6 load testing. It generates docker-compose
 // configuration with Prometheus targets for all servers and k6 targets for data planes.
-func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *models.Server, dataPlanes, appServers []*models.Server) error {
+func (d *Deployer) DeployControlPlaneWithServers(server *models.Server, dataPlanes, appServers []*models.Server) error {
 	sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to connect via SSH: %w", err)
@@ -397,9 +445,9 @@ func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *mod
 
 	// Prepare template data
 	data := TemplateData{
-		PrometheusPort:      d.config.Monitoring.PrometheusPort,
-		CAdvisorPort:        d.config.Monitoring.CAdvisorPort,
-		NodeExporterPort:    d.config.Monitoring.NodeExporterPort,
+		PrometheusPort:      d.config.Monitoring.Prometheus.Port,
+		CAdvisorPort:        d.config.Monitoring.CAdvisor.Port,
+		NodeExporterPort:    d.config.Monitoring.NodeExporter.Port,
 		APIKey:              d.config.APISIX.APIKey,
 		AutoscalerEnabled:   d.config.Autoscaler.Enabled,
 		HetznerToken:        os.Getenv("HETZNER_API_TOKEN"),
@@ -465,7 +513,7 @@ func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *mod
 
 	// Copy Grafana configuration files
 	if _, err := os.Stat("grafana"); err == nil {
-		d.log(deploymentID, "info", "Copying Grafana configuration to control plane...")
+		d.log("info", "Copying Grafana configuration to control plane...")
 
 		// Create Grafana directories
 		if _, err := sshClient.Execute("sudo mkdir -p /var/lib/harbor/grafana/config && sudo chown -R $USER:$USER /var/lib/harbor"); err != nil {
@@ -487,18 +535,18 @@ func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *mod
 			return fmt.Errorf("failed to copy grafana dashboards directory: %w", err)
 		}
 
-		d.log(deploymentID, "info", "✓ Grafana configuration copied to control plane")
+		d.log("info", "✓ Grafana configuration copied to control plane")
 	}
 
 	// Copy harbor config for autoscaler
 	if d.config.Autoscaler.Enabled {
 		configPath := "harbor.yaml"
 		if _, err := os.Stat(configPath); err == nil {
-			d.log(deploymentID, "info", "Copying harbor config for autoscaler...")
+			d.log("info", "Copying harbor config for autoscaler...")
 			if err := sshClient.CopyFile(configPath, "/var/lib/harbor/config.yaml"); err != nil {
 				return fmt.Errorf("failed to copy config file: %w", err)
 			}
-			d.log(deploymentID, "info", "✓ Config copied to control plane")
+			d.log("info", "✓ Config copied to control plane")
 		}
 	}
 
@@ -506,7 +554,7 @@ func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *mod
 	if d.config.K6.Enabled {
 		k6ScriptPath := "k6/loadtest.js"
 		if _, err := os.Stat(k6ScriptPath); err == nil {
-			d.log(deploymentID, "info", "Copying k6 load test script to control plane...")
+			d.log("info", "Copying k6 load test script to control plane...")
 			// Create k6 directory
 			if _, err := sshClient.Execute("sudo mkdir -p /var/lib/harbor/k6 && sudo chown -R $USER:$USER /var/lib/harbor"); err != nil {
 				return fmt.Errorf("failed to create k6 directory: %w", err)
@@ -514,21 +562,21 @@ func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *mod
 			if err := sshClient.CopyFile(k6ScriptPath, "/var/lib/harbor/k6/loadtest.js"); err != nil {
 				return fmt.Errorf("failed to copy k6 script: %w", err)
 			}
-			d.log(deploymentID, "info", "✓ k6 script copied to control plane")
+			d.log("info", "✓ k6 script copied to control plane")
 		} else {
-			d.log(deploymentID, "warn", "k6 enabled but k6/loadtest.js not found")
+			d.log("warn", "k6 enabled but k6/loadtest.js not found")
 		}
 	}
 
 	// Copy APISIX plugins directory
 	if _, err := os.Stat("apisix/plugins"); err == nil {
-		d.log(deploymentID, "info", "Copying APISIX plugins to control plane...")
+		d.log("info", "Copying APISIX plugins to control plane...")
 		if err := sshClient.CopyDir("apisix/plugins", "/var/lib/harbor/apisix/plugins"); err != nil {
 			return fmt.Errorf("failed to copy plugins directory: %w", err)
 		}
-		d.log(deploymentID, "info", "✓ Plugins copied to control plane")
+		d.log("info", "✓ Plugins copied to control plane")
 	} else {
-		d.log(deploymentID, "warn", "No apisix/plugins directory found, skipping plugin copy")
+		d.log("warn", "No apisix/plugins directory found, skipping plugin copy")
 	}
 
 	// Start services
@@ -542,7 +590,7 @@ func (d *Deployer) DeployControlPlaneWithServers(deploymentID int64, server *mod
 // DeployDataPlane deploys APISIX data plane services to a load balancer server.
 // It configures the data plane to connect to the control plane's etcd instance and
 // deploys monitoring agents (cAdvisor, node-exporter) for metrics collection.
-func (d *Deployer) DeployDataPlane(deploymentID int64, server *models.Server, controlPlaneIP string) error {
+func (d *Deployer) DeployDataPlane(server *models.Server, controlPlaneIP string) error {
 	sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to connect via SSH: %w", err)
@@ -556,8 +604,8 @@ func (d *Deployer) DeployDataPlane(deploymentID int64, server *models.Server, co
 
 	// Prepare template data
 	data := TemplateData{
-		CAdvisorPort:     d.config.Monitoring.CAdvisorPort,
-		NodeExporterPort: d.config.Monitoring.NodeExporterPort,
+		CAdvisorPort:     d.config.Monitoring.CAdvisor.Port,
+		NodeExporterPort: d.config.Monitoring.NodeExporter.Port,
 		ControlPlaneIP:   controlPlaneIP,
 	}
 
@@ -583,11 +631,11 @@ func (d *Deployer) DeployDataPlane(deploymentID int64, server *models.Server, co
 
 	// Copy APISIX plugins directory
 	if _, err := os.Stat("apisix/plugins"); err == nil {
-		d.log(deploymentID, "info", fmt.Sprintf("Copying APISIX plugins to %s...", server.Name))
+		d.log("info", fmt.Sprintf("Copying APISIX plugins to %s...", server.Name))
 		if err := sshClient.CopyDir("apisix/plugins", "/var/lib/harbor/apisix/plugins"); err != nil {
 			return fmt.Errorf("failed to copy plugins directory: %w", err)
 		}
-		d.log(deploymentID, "info", fmt.Sprintf("✓ Plugins copied to %s", server.Name))
+		d.log("info", fmt.Sprintf("✓ Plugins copied to %s", server.Name))
 	}
 
 	// Start services
@@ -599,9 +647,9 @@ func (d *Deployer) DeployDataPlane(deploymentID int64, server *models.Server, co
 }
 
 // DeployAppServer deploys the user's application container to an app server.
-// It configures the application with nginx reverse proxy and monitoring agents.
-// The application is exposed on port 80 and registered as an upstream in APISIX.
-func (d *Deployer) DeployAppServer(deploymentID int64, server *models.Server) error {
+// If a custom docker-compose.yml file is specified in the config, it will be used
+// and all volume-mounted files will be copied to the server.
+func (d *Deployer) DeployAppServer(server *models.Server) error {
 	sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to connect via SSH: %w", err)
@@ -613,32 +661,14 @@ func (d *Deployer) DeployAppServer(deploymentID int64, server *models.Server) er
 		return fmt.Errorf("failed to create deployment directory: %w", err)
 	}
 
-	// Prepare template data
-	data := TemplateData{
-		CAdvisorPort:     d.config.Monitoring.CAdvisorPort,
-		NodeExporterPort: d.config.Monitoring.NodeExporterPort,
-		AppImage:         d.config.Container.Image,
-		ServerID:         server.Name,
+	// Check if custom docker-compose file is specified
+	if d.config.App.ComposeFile == "" {
+		return fmt.Errorf("app.compose_file is required in config")
 	}
 
-	// Render and deploy docker-compose
-	composeContent, err := RenderTemplate(AppServerTemplate, data)
-	if err != nil {
-		return fmt.Errorf("failed to render app server template: %w", err)
-	}
-
-	if err := sshClient.WriteFile("/var/lib/harbor/docker-compose.yml", composeContent); err != nil {
-		return fmt.Errorf("failed to write docker-compose.yml: %w", err)
-	}
-
-	// Render and deploy nginx config
-	nginxContent, err := RenderTemplate(NginxConfigTemplate, data)
-	if err != nil {
-		return fmt.Errorf("failed to render nginx config: %w", err)
-	}
-
-	if err := sshClient.WriteFile("/var/lib/harbor/nginx.conf", nginxContent); err != nil {
-		return fmt.Errorf("failed to write nginx.conf: %w", err)
+	// Copy docker-compose.yml and all volume files
+	if err := CopyComposeFilesAndVolumes(sshClient, d.config.App.ComposeFile, "/var/lib/harbor", server.Name); err != nil {
+		return fmt.Errorf("failed to copy compose files and volumes: %w", err)
 	}
 
 	// Start services
@@ -652,7 +682,7 @@ func (d *Deployer) DeployAppServer(deploymentID int64, server *models.Server) er
 // ConfigureAPISIX configures APISIX routes, upstreams, global rules, and SSL certificates.
 // It waits for the APISIX Admin API to be ready, then creates upstreams pointing to app servers,
 // configures routes from harbor.yaml, and optionally sets up SSL/TLS certificates.
-func (d *Deployer) ConfigureAPISIX(deploymentID int64, controlPlane *models.Server, appServers []*models.Server) error {
+func (d *Deployer) ConfigureAPISIX(controlPlane *models.Server, appServers []*models.Server) error {
 	// Connect to control plane via SSH to run curl commands locally
 	sshClient, err := ssh.New(controlPlane.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
@@ -661,7 +691,7 @@ func (d *Deployer) ConfigureAPISIX(deploymentID int64, controlPlane *models.Serv
 	defer sshClient.Close()
 
 	// Wait for APISIX to be ready
-	d.log(deploymentID, "info", "Waiting for APISIX Admin API to be ready...")
+	d.log("info", "Waiting for APISIX Admin API to be ready...")
 	adminURL := "http://127.0.0.1:9180"
 	apiKey := d.config.APISIX.APIKey
 
@@ -669,7 +699,7 @@ func (d *Deployer) ConfigureAPISIX(deploymentID int64, controlPlane *models.Serv
 		cmd := fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' %s/apisix/admin/routes -H 'X-API-KEY: %s'", adminURL, apiKey)
 		output, err := sshClient.Execute(cmd)
 		if err == nil && output == "200" {
-			d.log(deploymentID, "info", "✓ APISIX Admin API is ready")
+			d.log("info", "✓ APISIX Admin API is ready")
 			break
 		}
 		if i == 29 {
@@ -683,7 +713,7 @@ func (d *Deployer) ConfigureAPISIX(deploymentID int64, controlPlane *models.Serv
 
 	// Create upstreams
 	for _, upstream := range d.config.APISIX.Upstreams {
-		d.log(deploymentID, "info", fmt.Sprintf("Creating upstream: %s", upstream.Name))
+		d.log("info", fmt.Sprintf("Creating upstream: %s", upstream.Name))
 
 		// Build nodes map based on upstream type
 		nodes := make(map[string]int)
@@ -706,7 +736,7 @@ func (d *Deployer) ConfigureAPISIX(deploymentID int64, controlPlane *models.Serv
 
 	// Create global rules
 	for _, rule := range d.config.APISIX.GlobalRules {
-		d.log(deploymentID, "info", fmt.Sprintf("Creating global rule: %s", rule.ID))
+		d.log("info", fmt.Sprintf("Creating global rule: %s", rule.ID))
 		if err := client.CreateGlobalRule(rule); err != nil {
 			return fmt.Errorf("failed to create global rule %s: %w", rule.ID, err)
 		}
@@ -714,7 +744,7 @@ func (d *Deployer) ConfigureAPISIX(deploymentID int64, controlPlane *models.Serv
 
 	// Create routes
 	for _, route := range d.config.APISIX.Routes {
-		d.log(deploymentID, "info", fmt.Sprintf("Creating route: %s", route.Name))
+		d.log("info", fmt.Sprintf("Creating route: %s", route.Name))
 		if err := client.CreateRoute(route); err != nil {
 			return fmt.Errorf("failed to create route %s: %w", route.Name, err)
 		}
@@ -722,41 +752,41 @@ func (d *Deployer) ConfigureAPISIX(deploymentID int64, controlPlane *models.Serv
 
 	// Create SSL certificates (if configured)
 	if d.config.APISIX.SSL.CertPath != "" {
-		d.log(deploymentID, "info", "Configuring SSL certificates")
+		d.log("info", "Configuring SSL certificates")
 
 		cert, err := os.ReadFile(d.config.APISIX.SSL.CertPath)
 		if err != nil {
-			d.log(deploymentID, "warn", fmt.Sprintf("Failed to read SSL cert: %v", err))
+			d.log("warn", fmt.Sprintf("Failed to read SSL cert: %v", err))
 		} else {
 			key, err := os.ReadFile(d.config.APISIX.SSL.KeyPath)
 			if err != nil {
-				d.log(deploymentID, "warn", fmt.Sprintf("Failed to read SSL key: %v", err))
+				d.log("warn", fmt.Sprintf("Failed to read SSL key: %v", err))
 			} else {
 				var clientCA string
 				if d.config.APISIX.SSL.ClientCAPath != "" {
 					caBytes, err := os.ReadFile(d.config.APISIX.SSL.ClientCAPath)
 					if err != nil {
-						d.log(deploymentID, "warn", fmt.Sprintf("Failed to read client CA: %v", err))
+						d.log("warn", fmt.Sprintf("Failed to read client CA: %v", err))
 					} else {
 						clientCA = string(caBytes)
 					}
 				}
 
 				if err := client.CreateSSL(d.config.APISIX.SSL, string(cert), string(key), clientCA); err != nil {
-					d.log(deploymentID, "warn", fmt.Sprintf("Failed to configure SSL: %v", err))
+					d.log("warn", fmt.Sprintf("Failed to configure SSL: %v", err))
 				}
 			}
 		}
 	}
 
-	d.log(deploymentID, "info", "APISIX configuration completed")
+	d.log("info", "APISIX configuration completed")
 	return nil
 }
 
 // UpdateAPISIXUpstreams updates only the upstream backend nodes in APISIX.
 // This is used during scaling operations to add or remove app servers from the load balancer
 // without recreating routes or other APISIX configuration.
-func (d *Deployer) UpdateAPISIXUpstreams(deploymentID int64, controlPlane *models.Server, appServers []*models.Server) error {
+func (d *Deployer) UpdateAPISIXUpstreams(controlPlane *models.Server, appServers []*models.Server) error {
 	// Connect to control plane via SSH
 	sshClient, err := ssh.New(controlPlane.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
@@ -771,7 +801,7 @@ func (d *Deployer) UpdateAPISIXUpstreams(deploymentID int64, controlPlane *model
 
 	// Update upstreams only
 	for _, upstream := range d.config.APISIX.Upstreams {
-		d.log(deploymentID, "info", fmt.Sprintf("Updating upstream: %s", upstream.Name))
+		d.log("info", fmt.Sprintf("Updating upstream: %s", upstream.Name))
 
 		// Build nodes map based on upstream type
 		nodes := make(map[string]int)
@@ -792,14 +822,50 @@ func (d *Deployer) UpdateAPISIXUpstreams(deploymentID int64, controlPlane *model
 		}
 	}
 
-	d.log(deploymentID, "info", "✓ Upstreams updated")
+	d.log("info", "✓ Upstreams updated")
+	return nil
+}
+
+// updateAPISIXUpstreamsWithServers updates APISIX upstreams with a specific list of app servers
+// This is useful for removing/adding servers during rolling deployments
+func (d *Deployer) updateAPISIXUpstreamsWithServers(controlPlane *models.Server, appServers []*models.Server) error {
+	// Connect to control plane via SSH
+	sshClient, err := ssh.New(controlPlane.PublicIP, d.sshUser, d.privateKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to connect to control plane: %w", err)
+	}
+	defer sshClient.Close()
+
+	// Create APISIX client that executes via SSH
+	adminURL := "http://127.0.0.1:9180"
+	apiKey := d.config.APISIX.APIKey
+	client := apisix.NewWithSSH(adminURL, apiKey, sshClient)
+
+	// Update upstreams with the provided app servers
+	for _, upstream := range d.config.APISIX.Upstreams {
+		// Skip non-app upstreams
+		if upstream.ID == "grafana" {
+			continue
+		}
+
+		// Build nodes map with provided app servers
+		nodes := make(map[string]int)
+		for _, server := range appServers {
+			nodes[fmt.Sprintf("%s:80", server.PrivateIP)] = 1
+		}
+
+		if err := client.CreateUpstream(upstream, nodes); err != nil {
+			return fmt.Errorf("failed to update upstream %s: %w", upstream.Name, err)
+		}
+	}
+
 	return nil
 }
 
 // UpdatePrometheusConfig updates the Prometheus scrape targets configuration.
 // This is used during scaling operations to add or remove servers from Prometheus monitoring.
 // After updating the configuration file, it triggers a hot reload of Prometheus.
-func (d *Deployer) UpdatePrometheusConfig(deploymentID int64, controlPlane *models.Server, dataPlanes []*models.Server, appServers []*models.Server) error {
+func (d *Deployer) UpdatePrometheusConfig(controlPlane *models.Server, dataPlanes []*models.Server, appServers []*models.Server) error {
 	// Connect to control plane via SSH
 	sshClient, err := ssh.New(controlPlane.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
@@ -837,13 +903,13 @@ func (d *Deployer) UpdatePrometheusConfig(deploymentID int64, controlPlane *mode
 	}
 
 	// Reload Prometheus configuration
-	d.log(deploymentID, "info", "Reloading Prometheus configuration")
+	d.log("info", "Reloading Prometheus configuration")
 	reloadCmd := "curl -X POST http://localhost:9090/-/reload"
 	if _, err := sshClient.Execute(reloadCmd); err != nil {
 		return fmt.Errorf("failed to reload Prometheus: %w", err)
 	}
 
-	d.log(deploymentID, "info", "✓ Prometheus configuration updated")
+	d.log("info", "✓ Prometheus configuration updated")
 	return nil
 }
 
@@ -851,32 +917,23 @@ func (d *Deployer) UpdatePrometheusConfig(deploymentID int64, controlPlane *mode
 // It stops the existing k6 container, updates the configuration with current data plane targets,
 // and starts a new k6 container with parameters from harbor.yaml (rate, duration, VUs, etc).
 func (d *Deployer) RestartK6(ctx context.Context) error {
-	// Get control plane server
-	controlPlane, err := d.serverRepo.GetByRole(models.RoleControlPlane)
-	if err != nil {
-		return fmt.Errorf("failed to get control plane: %w", err)
-	}
-	if len(controlPlane) == 0 {
-		return fmt.Errorf("no control plane server found")
-	}
-
-	// Get all data planes from Hetzner (for accurate targets)
-	token := os.Getenv("HETZNER_API_TOKEN")
-	if token == "" {
-		return fmt.Errorf("HETZNER_API_TOKEN environment variable not set")
-	}
-
-	_, dataPlanes, _, err := d.getServersFromHetzner(ctx, token)
+	// Get servers from Hetzner
+	controlPlanes, dataPlanes, _, err := d.getServersFromHetzner(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get servers from Hetzner: %w", err)
+	}
+	if len(controlPlanes) == 0 {
+		return fmt.Errorf("no control plane server found")
 	}
 
 	if len(dataPlanes) == 0 {
 		return fmt.Errorf("no data plane servers found")
 	}
 
+	controlPlane := controlPlanes[0]
+
 	// Connect to control plane via SSH
-	sshClient, err := ssh.New(controlPlane[0].PublicIP, d.sshUser, d.privateKeyPath)
+	sshClient, err := ssh.New(controlPlane.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to connect to control plane: %w", err)
 	}
@@ -957,17 +1014,19 @@ func (d *Deployer) RestartK6(ctx context.Context) error {
 // If the k6 container is not running, it returns without error. This is useful for
 // temporarily halting load testing without removing configuration.
 func (d *Deployer) StopK6(ctx context.Context) error {
-	// Get control plane server
-	controlPlane, err := d.serverRepo.GetByRole(models.RoleControlPlane)
+	// Get control plane from Hetzner
+	controlPlanes, _, _, err := d.getServersFromHetzner(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get control plane: %w", err)
 	}
-	if len(controlPlane) == 0 {
+	if len(controlPlanes) == 0 {
 		return fmt.Errorf("no control plane server found")
 	}
 
+	controlPlane := controlPlanes[0]
+
 	// Connect to control plane via SSH
-	sshClient, err := ssh.New(controlPlane[0].PublicIP, d.sshUser, d.privateKeyPath)
+	sshClient, err := ssh.New(controlPlane.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to connect to control plane: %w", err)
 	}
@@ -995,7 +1054,7 @@ func (d *Deployer) StopK6(ctx context.Context) error {
 }
 
 // waitForControlPlane waits for control plane services to be ready
-func (d *Deployer) waitForControlPlane(deploymentID int64, server *models.Server) error {
+func (d *Deployer) waitForControlPlane(server *models.Server) error {
 	sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to connect via SSH: %w", err)
@@ -1003,27 +1062,27 @@ func (d *Deployer) waitForControlPlane(deploymentID int64, server *models.Server
 	defer sshClient.Close()
 
 	// Wait for etcd to be ready
-	d.log(deploymentID, "info", "Checking etcd...")
+	d.log("info", "Checking etcd...")
 	if err := d.waitForService(sshClient, "curl -sf http://127.0.0.1:2379/health", 60, 2*time.Second); err != nil {
 		return fmt.Errorf("etcd failed to become ready: %w", err)
 	}
-	d.log(deploymentID, "info", "✓ etcd is ready")
+	d.log("info", "✓ etcd is ready")
 
 	// Wait for APISIX control plane to be ready
-	d.log(deploymentID, "info", "Checking APISIX control plane...")
+	d.log("info", "Checking APISIX control plane...")
 	apiKey := d.config.APISIX.APIKey
 	checkCmd := fmt.Sprintf("curl -sf -H 'X-API-KEY: %s' http://127.0.0.1:9180/apisix/admin/routes", apiKey)
 	if err := d.waitForService(sshClient, checkCmd, 60, 2*time.Second); err != nil {
 		return fmt.Errorf("APISIX control plane failed to become ready: %w", err)
 	}
-	d.log(deploymentID, "info", "✓ APISIX control plane is ready")
+	d.log("info", "✓ APISIX control plane is ready")
 
 	// Wait for Prometheus to be ready
-	d.log(deploymentID, "info", "Checking Prometheus...")
+	d.log("info", "Checking Prometheus...")
 	if err := d.waitForService(sshClient, "curl -sf http://127.0.0.1:9090/-/ready", 30, 2*time.Second); err != nil {
 		return fmt.Errorf("prometheus failed to become ready: %w", err)
 	}
-	d.log(deploymentID, "info", "✓ Prometheus is ready")
+	d.log("info", "✓ Prometheus is ready")
 
 	return nil
 }
@@ -1041,7 +1100,7 @@ func (d *Deployer) waitForService(sshClient *ssh.Client, healthCheckCmd string, 
 }
 
 // waitForServersReady waits for all servers to be SSH accessible
-func (d *Deployer) waitForServersReady(deploymentID int64, servers []*models.Server) error {
+func (d *Deployer) waitForServersReady(servers []*models.Server) error {
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(servers))
 
@@ -1049,7 +1108,7 @@ func (d *Deployer) waitForServersReady(deploymentID int64, servers []*models.Ser
 		wg.Add(1)
 		go func(srv *models.Server) {
 			defer wg.Done()
-			d.log(deploymentID, "info", fmt.Sprintf("Waiting for SSH on %s...", srv.Name))
+			d.log("info", fmt.Sprintf("Waiting for SSH on %s...", srv.Name))
 
 			// Try to connect with timeout
 			client, err := ssh.WaitForConnection(srv.PublicIP, d.sshUser, d.privateKeyPath, 10*time.Minute)
@@ -1059,12 +1118,7 @@ func (d *Deployer) waitForServersReady(deploymentID int64, servers []*models.Ser
 			}
 			client.Close()
 
-			// Update server status to running
-			if err := d.serverRepo.UpdateStatus(srv.ID, "running"); err != nil {
-				d.log(deploymentID, "warn", fmt.Sprintf("Failed to update status for %s: %v", srv.Name, err))
-			}
-
-			d.log(deploymentID, "info", fmt.Sprintf("✓ %s is SSH accessible", srv.Name))
+			d.log("info", fmt.Sprintf("✓ %s is SSH accessible", srv.Name))
 		}(server)
 	}
 
@@ -1084,8 +1138,30 @@ func (d *Deployer) waitForServersReady(deploymentID int64, servers []*models.Ser
 	return nil
 }
 
+// waitForServerHealth waits for a single app server to respond to HTTP requests on port 80
+func (d *Deployer) waitForServerHealth(server *models.Server) error {
+	sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to connect via SSH: %w", err)
+	}
+	defer sshClient.Close()
+
+	// Try to connect to the app server for up to 60 seconds
+	for i := 0; i < 30; i++ {
+		// Check if the service is responding on port 80 via private IP
+		cmd := fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' http://%s:80 --connect-timeout 2", server.PrivateIP)
+		output, err := sshClient.Execute(cmd)
+		if err == nil && (output == "200" || output == "301" || output == "302") {
+			return nil // Health check passed
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	return fmt.Errorf("server did not become healthy after 60 seconds")
+}
+
 // waitForDataPlanes waits for all data plane APISIX instances to be ready
-func (d *Deployer) waitForDataPlanes(deploymentID int64, dataPlanes []*models.Server) error {
+func (d *Deployer) waitForDataPlanes(dataPlanes []*models.Server) error {
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(dataPlanes))
 
@@ -1093,7 +1169,7 @@ func (d *Deployer) waitForDataPlanes(deploymentID int64, dataPlanes []*models.Se
 		wg.Add(1)
 		go func(srv *models.Server) {
 			defer wg.Done()
-			d.log(deploymentID, "info", fmt.Sprintf("Checking APISIX data plane on %s...", srv.Name))
+			d.log("info", fmt.Sprintf("Checking APISIX data plane on %s...", srv.Name))
 
 			sshClient, err := ssh.New(srv.PublicIP, d.sshUser, d.privateKeyPath)
 			if err != nil {
@@ -1109,7 +1185,7 @@ func (d *Deployer) waitForDataPlanes(deploymentID int64, dataPlanes []*models.Se
 				return
 			}
 
-			d.log(deploymentID, "info", fmt.Sprintf("✓ APISIX data plane on %s is ready", srv.Name))
+			d.log("info", fmt.Sprintf("✓ APISIX data plane on %s is ready", srv.Name))
 		}(server)
 	}
 
@@ -1133,9 +1209,6 @@ func (d *Deployer) waitForDataPlanes(deploymentID int64, dataPlanes []*models.Se
 // This method is primarily used by the autoscaler when adding new servers dynamically.
 // It installs Docker and deploys either data plane or app services depending on the role label.
 func (d *Deployer) DeployToServer(serverIP string, roleLabel string, controlPlaneIP string) error {
-	// Use a fake deployment ID for logging
-	deploymentID := int64(0)
-
 	// Connect via SSH
 	sshClient, err := ssh.New(serverIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
@@ -1144,7 +1217,7 @@ func (d *Deployer) DeployToServer(serverIP string, roleLabel string, controlPlan
 	defer sshClient.Close()
 
 	// Install Docker
-	d.log(deploymentID, "info", fmt.Sprintf("Installing Docker on %s...", serverIP))
+	d.log("info", fmt.Sprintf("Installing Docker on %s...", serverIP))
 	if err := d.dockerClient.Install(sshClient); err != nil {
 		return fmt.Errorf("failed to install Docker: %w", err)
 	}
@@ -1158,41 +1231,31 @@ func (d *Deployer) DeployToServer(serverIP string, roleLabel string, controlPlan
 	// Deploy services based on role
 	switch roleLabel {
 	case "lb":
-		d.log(deploymentID, "info", fmt.Sprintf("Deploying data plane services on %s...", serverIP))
-		if err := d.DeployDataPlane(deploymentID, server, controlPlaneIP); err != nil {
+		d.log("info", fmt.Sprintf("Deploying data plane services on %s...", serverIP))
+		if err := d.DeployDataPlane(server, controlPlaneIP); err != nil {
 			return fmt.Errorf("failed to deploy data plane: %w", err)
 		}
 	case "app":
-		d.log(deploymentID, "info", fmt.Sprintf("Deploying app services on %s...", serverIP))
-		if err := d.DeployAppServer(deploymentID, server); err != nil {
+		d.log("info", fmt.Sprintf("Deploying app services on %s...", serverIP))
+		if err := d.DeployAppServer(server); err != nil {
 			return fmt.Errorf("failed to deploy app server: %w", err)
 		}
 	default:
 		return fmt.Errorf("unsupported role: %s", roleLabel)
 	}
 
-	d.log(deploymentID, "info", fmt.Sprintf("✓ Services deployed on %s", serverIP))
+	d.log("info", fmt.Sprintf("✓ Services deployed on %s", serverIP))
 	return nil
 }
 
-func (d *Deployer) log(deploymentID int64, level, message string) {
-	// Only log to database if deployment ID is valid
-	if deploymentID > 0 {
-		_ = d.deployRepo.AddLog(deploymentID, level, message)
-	}
+func (d *Deployer) log(level, message string) {
 	fmt.Printf("[%s] %s\n", level, message)
 }
 
 // getServersFromHetzner queries Hetzner API for servers by role labels
-func (d *Deployer) getServersFromHetzner(ctx context.Context, token string) (controlPlanes, dataPlanes, appServers []*models.Server, err error) {
-	client := hcloud.NewClient(hcloud.WithToken(token))
-
+func (d *Deployer) getServersFromHetzner(ctx context.Context) (controlPlanes, dataPlanes, appServers []*models.Server, err error) {
 	// Get control plane servers
-	controlHetzner, err := client.Server.AllWithOpts(ctx, hcloud.ServerListOpts{
-		ListOpts: hcloud.ListOpts{
-			LabelSelector: "role=control",
-		},
-	})
+	controlHetzner, err := d.hetzner.GetServersByLabel(ctx, "role", "control")
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to get control planes: %w", err)
 	}
@@ -1200,11 +1263,7 @@ func (d *Deployer) getServersFromHetzner(ctx context.Context, token string) (con
 	controlPlanes = HcloudListToModels(controlHetzner)
 
 	// Get data plane (load balancer) servers
-	lbHetzner, err := client.Server.AllWithOpts(ctx, hcloud.ServerListOpts{
-		ListOpts: hcloud.ListOpts{
-			LabelSelector: "role=lb",
-		},
-	})
+	lbHetzner, err := d.hetzner.GetServersByLabel(ctx, "role", "lb")
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to get data planes: %w", err)
 	}
@@ -1212,11 +1271,7 @@ func (d *Deployer) getServersFromHetzner(ctx context.Context, token string) (con
 	dataPlanes = HcloudListToModels(lbHetzner)
 
 	// Get app servers
-	appHetzner, err := client.Server.AllWithOpts(ctx, hcloud.ServerListOpts{
-		ListOpts: hcloud.ListOpts{
-			LabelSelector: "role=app",
-		},
-	})
+	appHetzner, err := d.hetzner.GetServersByLabel(ctx, "role", "app")
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to get app servers: %w", err)
 	}

@@ -4,29 +4,22 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/dihmeetree/harbor/internal/cli"
 	"github.com/dihmeetree/harbor/internal/config"
-	"github.com/dihmeetree/harbor/internal/database"
 	"github.com/dihmeetree/harbor/internal/hetzner"
 	"github.com/dihmeetree/harbor/internal/orchestrator"
-	"github.com/dihmeetree/harbor/pkg/models"
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 	"github.com/spf13/cobra"
 )
 
 var (
-	cfgFile string
-	dbPath  string
-	rootCmd *cobra.Command
+	cfgFile     string
+	composeFile string
+	rootCmd     *cobra.Command
 )
 
 func init() {
-	// Set default paths
-	homeDir, _ := os.UserHomeDir()
-	defaultDBPath := filepath.Join(homeDir, ".harbor", "state.db")
-
 	rootCmd = &cobra.Command{
 		Use:   "harbor",
 		Short: "Harbor - Infrastructure provisioning and management CLI",
@@ -36,13 +29,13 @@ load balancers, and observability stacks.`,
 	}
 
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "harbor.yaml", "config file path")
-	rootCmd.PersistentFlags().StringVarP(&dbPath, "db", "d", defaultDBPath, "database file path")
 
 	// Add commands
 	rootCmd.AddCommand(initCmd())
 	rootCmd.AddCommand(validateCmd())
 	rootCmd.AddCommand(deployCmd())
 	rootCmd.AddCommand(redeployCmd())
+	rootCmd.AddCommand(redeployAppCmd())
 	rootCmd.AddCommand(statusCmd())
 	rootCmd.AddCommand(scaleCmd())
 	rootCmd.AddCommand(k6Cmd())
@@ -114,20 +107,24 @@ func validateCmd() *cobra.Command {
 }
 
 func deployCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "deploy",
 		Short: "Deploy infrastructure",
 		Long:  "Provisions all infrastructure components defined in the configuration",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Initialize command context
-			cmdCtx, err := cli.InitCommandContext(cfgFile, dbPath)
+			cmdCtx, err := cli.InitCommandContext(cfgFile)
 			if err != nil {
 				return err
 			}
-			defer cmdCtx.Close()
+
+			// Override compose file if flag is set
+			if composeFile != "" {
+				cmdCtx.Config.App.ComposeFile = composeFile
+			}
 
 			// Create provisioner
-			provisioner := orchestrator.NewProvisioner(cmdCtx.Config, cmdCtx.Token, cmdCtx.DB)
+			provisioner := orchestrator.NewProvisioner(cmdCtx.Config, cmdCtx.Token)
 
 			// Provision infrastructure
 			ctx := context.Background()
@@ -139,10 +136,12 @@ func deployCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&composeFile, "compose-file", "", "Path to docker-compose.yml for app servers (overrides config)")
+	return cmd
 }
 
 func redeployCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "redeploy",
 		Short: "Redeploy services to existing infrastructure",
 		Long:  "Redeploys Docker containers and APISIX configuration to existing servers without recreating infrastructure",
@@ -153,18 +152,23 @@ func redeployCmd() *cobra.Command {
 				return fmt.Errorf("failed to load config: %w", err)
 			}
 
-			// Open database
-			db, err := database.New(dbPath)
-			if err != nil {
-				return fmt.Errorf("failed to open database: %w", err)
+			// Override compose file if flag is set
+			if composeFile != "" {
+				cfg.App.ComposeFile = composeFile
 			}
-			defer db.Close()
 
-			// Check if infrastructure exists
-			serverRepo := database.NewServerRepository(db)
-			servers, err := serverRepo.GetAll()
+			// Get Hetzner API token
+			token, err := cli.RequireEnvVar("HETZNER_API_TOKEN")
 			if err != nil {
-				return fmt.Errorf("failed to get servers: %w", err)
+				return err
+			}
+
+			// Check if infrastructure exists by querying Hetzner
+			ctx := context.Background()
+			hetznerClient := hetzner.New(token)
+			servers, err := hetznerClient.GetServersByLabel(ctx, "managed", "harbor")
+			if err != nil {
+				return fmt.Errorf("failed to query servers from Hetzner: %w", err)
 			}
 
 			if len(servers) == 0 {
@@ -177,10 +181,9 @@ func redeployCmd() *cobra.Command {
 				return err
 			}
 
-			deployer := orchestrator.NewDeployer(cfg, db, privateKeyPath)
+			deployer := orchestrator.NewDeployer(cfg, token, privateKeyPath)
 
 			// Deploy services only
-			ctx := context.Background()
 			if err := deployer.DeployServicesOnly(ctx); err != nil {
 				return fmt.Errorf("redeployment failed: %w", err)
 			}
@@ -189,6 +192,64 @@ func redeployCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&composeFile, "compose-file", "", "Path to docker-compose.yml for app servers (overrides config)")
+	return cmd
+}
+
+func redeployAppCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "redeploy-app",
+		Short: "Redeploy only app servers",
+		Long:  "Stops and redeploys only the app servers using docker-compose without affecting other infrastructure",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Load config
+			cfg, err := config.Load(cfgFile)
+			if err != nil {
+				return fmt.Errorf("failed to load config: %w", err)
+			}
+
+			// Override compose file if flag is set
+			if composeFile != "" {
+				cfg.App.ComposeFile = composeFile
+			}
+
+			// Get Hetzner API token
+			token, err := cli.RequireEnvVar("HETZNER_API_TOKEN")
+			if err != nil {
+				return err
+			}
+
+			// Check if infrastructure exists by querying Hetzner
+			ctx := context.Background()
+			hetznerClient := hetzner.New(token)
+			servers, err := hetznerClient.GetServersByLabel(ctx, "managed", "harbor")
+			if err != nil {
+				return fmt.Errorf("failed to query servers from Hetzner: %w", err)
+			}
+
+			if len(servers) == 0 {
+				return fmt.Errorf("no infrastructure found - run 'harbor deploy' first")
+			}
+
+			// Get SSH key path
+			privateKeyPath, err := cli.ResolveSshKeyPath(cfg)
+			if err != nil {
+				return err
+			}
+
+			deployer := orchestrator.NewDeployer(cfg, token, privateKeyPath)
+
+			// Redeploy only app servers
+			if err := deployer.RedeployAppServers(ctx); err != nil {
+				return fmt.Errorf("app server redeployment failed: %w", err)
+			}
+
+			fmt.Println("[info] ✓ App servers redeployed successfully!")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&composeFile, "compose-file", "", "Path to docker-compose.yml for app servers (overrides config)")
+	return cmd
 }
 
 // printServerGroup prints server information for a group of servers
@@ -288,14 +349,13 @@ func destroyCmd() *cobra.Command {
 			}
 
 			// Initialize command context
-			cmdCtx, err := cli.InitCommandContext(cfgFile, dbPath)
+			cmdCtx, err := cli.InitCommandContext(cfgFile)
 			if err != nil {
 				return err
 			}
-			defer cmdCtx.Close()
 
 			// Create provisioner
-			provisioner := orchestrator.NewProvisioner(cmdCtx.Config, cmdCtx.Token, cmdCtx.DB)
+			provisioner := orchestrator.NewProvisioner(cmdCtx.Config, cmdCtx.Token)
 
 			// Destroy infrastructure
 			ctx := context.Background()
@@ -379,29 +439,27 @@ func scaleServers(role, poolName string, targetReplicas int) error {
 		return err
 	}
 
-	// Open database
-	db, err := database.New(dbPath)
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
-	}
-	defer db.Close()
-
 	// Get SSH key path
 	sshKeyPath, err := cli.ResolveSshKeyPath(cfg)
 	if err != nil {
 		return err
 	}
 
-	// Get control plane IP for SSH connection
-	serverRepo := database.NewServerRepository(db)
-	controlPlane, err := serverRepo.GetByRole(models.RoleControlPlane)
-	if err != nil || len(controlPlane) == 0 {
-		return fmt.Errorf("failed to get control plane server: %w", err)
+	// Query Hetzner for control plane server
+	ctx := context.Background()
+	hetznerClient := hetzner.New(token)
+	controlPlanes, err := hetznerClient.GetServersByLabel(ctx, "role", "control")
+	if err != nil {
+		return fmt.Errorf("failed to get control plane server from Hetzner: %w", err)
+	}
+	if len(controlPlanes) == 0 {
+		return fmt.Errorf("no control plane server found - run 'harbor deploy' first")
 	}
 
+	controlPlaneIP := controlPlanes[0].PublicNet.IPv4.IP.String()
+
 	// Create manual scaler instance with control plane public IP for SSH
-	ctx := context.Background()
-	scaler, err := orchestrator.NewManualScaler(cfg, token, controlPlane[0].PublicIP, cfg.APISIX.APIKey, sshKeyPath, db)
+	scaler, err := orchestrator.NewManualScaler(cfg, token, controlPlaneIP, cfg.APISIX.APIKey, sshKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to create scaler: %w", err)
 	}
@@ -480,18 +538,17 @@ This will stop the current k6 container and recreate it with updated settings in
 				return fmt.Errorf("k6 is not enabled in configuration (k6.enabled: false)")
 			}
 
-			// Initialize database
-			db, err := database.New(dbPath)
+			// Get API token
+			token, err := cli.RequireEnvVar("HETZNER_API_TOKEN")
 			if err != nil {
-				return fmt.Errorf("failed to initialize database: %w", err)
+				return err
 			}
-			defer db.Close()
 
-			// Get control plane server
-			serverRepo := database.NewServerRepository(db)
-			controlPlanes, err := serverRepo.GetByRole(models.RoleControlPlane)
+			// Query Hetzner for control plane server
+			hetznerClient := hetzner.New(token)
+			controlPlanes, err := hetznerClient.GetServersByLabel(ctx, "role", "control")
 			if err != nil {
-				return fmt.Errorf("failed to get control plane server: %w", err)
+				return fmt.Errorf("failed to get control plane server from Hetzner: %w", err)
 			}
 
 			if len(controlPlanes) == 0 {
@@ -500,12 +557,6 @@ This will stop the current k6 container and recreate it with updated settings in
 
 			controlPlane := controlPlanes[0]
 
-			// Check API token
-			_, err = cli.RequireEnvVar("HETZNER_API_TOKEN")
-			if err != nil {
-				return err
-			}
-
 			// Get SSH key path
 			privateKeyPath, err := cli.ResolveSshKeyPath(cfg)
 			if err != nil {
@@ -513,10 +564,10 @@ This will stop the current k6 container and recreate it with updated settings in
 			}
 
 			// Initialize deployer
-			deployer := orchestrator.NewDeployer(cfg, db, privateKeyPath)
+			deployer := orchestrator.NewDeployer(cfg, token, privateKeyPath)
 
 			fmt.Println("[info] Restarting k6 load testing container...")
-			fmt.Printf("[info] Control plane: %s (%s)\n", controlPlane.Name, controlPlane.PublicIP)
+			fmt.Printf("[info] Control plane: %s (%s)\n", controlPlane.Name, controlPlane.PublicNet.IPv4.IP.String())
 
 			// Restart k6
 			if err := deployer.RestartK6(ctx); err != nil {
@@ -546,18 +597,17 @@ Use 'harbor k6 restart' to start it again later.`,
 				return fmt.Errorf("failed to load config: %w", err)
 			}
 
-			// Initialize database
-			db, err := database.New(dbPath)
+			// Get API token
+			token, err := cli.RequireEnvVar("HETZNER_API_TOKEN")
 			if err != nil {
-				return fmt.Errorf("failed to initialize database: %w", err)
+				return err
 			}
-			defer db.Close()
 
-			// Get control plane server
-			serverRepo := database.NewServerRepository(db)
-			controlPlanes, err := serverRepo.GetByRole(models.RoleControlPlane)
+			// Query Hetzner for control plane server
+			hetznerClient := hetzner.New(token)
+			controlPlanes, err := hetznerClient.GetServersByLabel(ctx, "role", "control")
 			if err != nil {
-				return fmt.Errorf("failed to get control plane server: %w", err)
+				return fmt.Errorf("failed to get control plane server from Hetzner: %w", err)
 			}
 
 			if len(controlPlanes) == 0 {
@@ -573,10 +623,10 @@ Use 'harbor k6 restart' to start it again later.`,
 			}
 
 			// Initialize deployer
-			deployer := orchestrator.NewDeployer(cfg, db, privateKeyPath)
+			deployer := orchestrator.NewDeployer(cfg, token, privateKeyPath)
 
 			fmt.Println("[info] Stopping k6 load testing container...")
-			fmt.Printf("[info] Control plane: %s (%s)\n", controlPlane.Name, controlPlane.PublicIP)
+			fmt.Printf("[info] Control plane: %s (%s)\n", controlPlane.Name, controlPlane.PublicNet.IPv4.IP.String())
 
 			// Stop k6
 			if err := deployer.StopK6(ctx); err != nil {

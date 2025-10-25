@@ -4,7 +4,6 @@ go 1.25.2
 
 require (
 	github.com/hetznercloud/hcloud-go/v2 v2.28.0
-	github.com/mattn/go-sqlite3 v1.14.32
 	github.com/pkg/sftp v1.13.9
 	github.com/spf13/cobra v1.10.1
 	golang.org/x/crypto v0.43.0

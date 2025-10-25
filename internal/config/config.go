@@ -14,7 +14,6 @@ type Config struct {
 	Control      ServerConfig     `yaml:"control"`
 	Network      NetworkConfig    `yaml:"network"`
 	Firewall     FirewallConfig   `yaml:"firewall"`
-	Container    ContainerConfig  `yaml:"container"`
 	LoadBalancer PoolConfig       `yaml:"loadbalancer"`
 	App          PoolConfig       `yaml:"app"`
 	APISIX       APISIXConfig     `yaml:"apisix"`
@@ -52,12 +51,6 @@ type FirewallRule struct {
 	Description string   `yaml:"description"`
 }
 
-// ContainerConfig represents container configuration
-type ContainerConfig struct {
-	Name  string `yaml:"name"`
-	Image string `yaml:"image"`
-}
-
 // PoolConfig represents a server pool configuration
 type PoolConfig struct {
 	Enabled     bool   `yaml:"enabled"`
@@ -65,6 +58,7 @@ type PoolConfig struct {
 	ServerType  string `yaml:"server_type"`
 	Location    string `yaml:"location"`
 	ServiceName string `yaml:"service_name"`
+	ComposeFile string `yaml:"compose_file"` // Path to docker-compose.yml file for this pool
 }
 
 // APISIXConfig represents APISIX configuration
@@ -121,9 +115,14 @@ type APISIXSSLConfig struct {
 
 // MonitoringConfig represents monitoring configuration
 type MonitoringConfig struct {
-	PrometheusPort   int `yaml:"prometheus_port"`
-	CAdvisorPort     int `yaml:"cadvisor_port"`
-	NodeExporterPort int `yaml:"node_exporter_port"`
+	Prometheus   ServiceConfig `yaml:"prometheus"`
+	CAdvisor     ServiceConfig `yaml:"cadvisor"`
+	NodeExporter ServiceConfig `yaml:"node_exporter"`
+}
+
+// ServiceConfig represents a service configuration with port
+type ServiceConfig struct {
+	Port int `yaml:"port"`
 }
 
 // AutoscalerConfig represents autoscaler configuration

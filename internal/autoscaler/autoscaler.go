@@ -14,7 +14,6 @@ import (
 
 	"github.com/dihmeetree/harbor/internal/apisix"
 	"github.com/dihmeetree/harbor/internal/config"
-	"github.com/dihmeetree/harbor/internal/database"
 	"github.com/dihmeetree/harbor/internal/orchestrator"
 	"github.com/dihmeetree/harbor/internal/ssh"
 	"github.com/dihmeetree/harbor/pkg/models"
@@ -52,19 +51,8 @@ func NewAutoscaler(cfg *config.Config, prometheusURL string, hetznerToken string
 	hetznerClient := hcloud.NewClient(hcloud.WithToken(hetznerToken))
 	apisixClient := apisix.New(apisixURL, apisixKey)
 
-	// Create a database for the deployer (won't be used for logs with deploymentID=0)
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get user home directory: %w", err)
-	}
-	dbPath := fmt.Sprintf("%s/.harbor/state.db", homeDir)
-	db, err := database.New(dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
-	}
-
 	// Create deployer for service deployment
-	deployer := orchestrator.NewDeployer(cfg, db, sshKeyPath)
+	deployer := orchestrator.NewDeployer(cfg, hetznerToken, sshKeyPath)
 
 	return &Autoscaler{
 		config:        cfg,
@@ -660,7 +648,7 @@ func (a *Autoscaler) updatePrometheusConfig(ctx context.Context) error {
 	}
 
 	// Call deployer's UpdatePrometheusConfig
-	return a.deployer.UpdatePrometheusConfig(0, controlPlaneModel, dataPlaneModels, appServerModels)
+	return a.deployer.UpdatePrometheusConfig(controlPlaneModel, dataPlaneModels, appServerModels)
 }
 
 // updateK6Config updates k6 load balancer targets by recreating the container

@@ -87,6 +87,15 @@ func (c *Client) GetNetwork(ctx context.Context, id int64) (*hcloud.Network, err
 	return network, nil
 }
 
+// GetNetworkByName retrieves a network by name
+func (c *Client) GetNetworkByName(ctx context.Context, name string) (*hcloud.Network, error) {
+	network, _, err := c.hcloud.Network.GetByName(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get network: %w", err)
+	}
+	return network, nil
+}
+
 // DeleteNetwork deletes a network
 func (c *Client) DeleteNetwork(ctx context.Context, id int64) error {
 	network, _, err := c.hcloud.Network.GetByID(ctx, id)
@@ -176,6 +185,15 @@ func (c *Client) GetSSHKey(ctx context.Context, id int64) (*hcloud.SSHKey, error
 // GetFirewall retrieves a firewall by ID
 func (c *Client) GetFirewall(ctx context.Context, id int64) (*hcloud.Firewall, error) {
 	firewall, _, err := c.hcloud.Firewall.GetByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get firewall: %w", err)
+	}
+	return firewall, nil
+}
+
+// GetFirewallByName retrieves a firewall by name
+func (c *Client) GetFirewallByName(ctx context.Context, name string) (*hcloud.Firewall, error) {
+	firewall, _, err := c.hcloud.Firewall.GetByName(ctx, name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get firewall: %w", err)
 	}

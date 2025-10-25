@@ -141,9 +141,12 @@ apisix:
 
 # Monitoring configuration
 monitoring:
-  prometheus_port: 9090
-  cadvisor_port: 8080
-  node_exporter_port: 9100
+  prometheus:
+    port: 9090
+  cadvisor:
+    port: 8080
+  node_exporter:
+    port: 9100
 
 # Autoscaler configuration
 autoscaler:

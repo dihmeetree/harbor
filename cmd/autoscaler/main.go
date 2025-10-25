@@ -33,7 +33,7 @@ func main() {
 	// Get Prometheus URL
 	prometheusURL := os.Getenv("PROMETHEUS_URL")
 	if prometheusURL == "" {
-		prometheusURL = fmt.Sprintf("http://localhost:%d", cfg.Monitoring.PrometheusPort)
+		prometheusURL = fmt.Sprintf("http://localhost:%d", cfg.Monitoring.Prometheus.Port)
 	}
 
 	// Get APISIX URL

@@ -1,0 +1,12 @@
+services:
+  # NGINX application
+  nginx:
+    container_name: nginx
+    image: nginx:latest
+    restart: always
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/web.conf:/etc/nginx/nginx.conf:ro
+    environment:
+      - NGINX_PORT=80
