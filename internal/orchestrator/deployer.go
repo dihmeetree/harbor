@@ -105,7 +105,7 @@ func (d *Deployer) DeployServicesOnly(ctx context.Context) error {
 		}(server)
 	}
 
-	// Deploy app servers in parallel
+	// Deploy app servers in parallel (includes monitoring)
 	d.log("info", fmt.Sprintf("Deploying %d app servers in parallel", len(appServers)))
 	for _, server := range appServers {
 		wg.Add(1)
@@ -117,6 +117,14 @@ func (d *Deployer) DeployServicesOnly(ctx context.Context) error {
 				return
 			}
 			d.log("info", fmt.Sprintf("✓ App deployed on %s", srv.Name))
+
+			// Deploy monitoring stack
+			d.log("info", fmt.Sprintf("Deploying monitoring on %s", srv.Name))
+			if err := d.DeployAppMonitoring(srv); err != nil {
+				errChan <- fmt.Errorf("failed to deploy monitoring on %s: %w", srv.Name, err)
+				return
+			}
+			d.log("info", fmt.Sprintf("✓ Monitoring deployed on %s", srv.Name))
 		}(server)
 	}
 
@@ -302,7 +310,7 @@ func (d *Deployer) Deploy(ctx context.Context) error {
 		}(server)
 	}
 
-	// Deploy app servers in parallel
+	// Deploy app servers in parallel (includes monitoring)
 	d.log("info", fmt.Sprintf("Deploying %d app servers in parallel", len(appServers)))
 	for _, server := range appServers {
 		wg.Add(1)
@@ -314,6 +322,14 @@ func (d *Deployer) Deploy(ctx context.Context) error {
 				return
 			}
 			d.log("info", fmt.Sprintf("✓ App deployed on %s", srv.Name))
+
+			// Deploy monitoring stack
+			d.log("info", fmt.Sprintf("Deploying monitoring on %s", srv.Name))
+			if err := d.DeployAppMonitoring(srv); err != nil {
+				errChan <- fmt.Errorf("failed to deploy monitoring on %s: %w", srv.Name, err)
+				return
+			}
+			d.log("info", fmt.Sprintf("✓ Monitoring deployed on %s", srv.Name))
 		}(server)
 	}
 
@@ -649,6 +665,7 @@ func (d *Deployer) DeployDataPlane(server *models.Server, controlPlaneIP string)
 // DeployAppServer deploys the user's application container to an app server.
 // If a custom docker-compose.yml file is specified in the config, it will be used
 // and all volume-mounted files will be copied to the server.
+// This method does NOT deploy monitoring - use DeployAppMonitoring for that.
 func (d *Deployer) DeployAppServer(server *models.Server) error {
 	sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
@@ -671,9 +688,38 @@ func (d *Deployer) DeployAppServer(server *models.Server) error {
 		return fmt.Errorf("failed to copy compose files and volumes: %w", err)
 	}
 
-	// Start services
+	// Start user services
 	if err := d.dockerClient.ComposeUp(sshClient, "/var/lib/harbor"); err != nil {
 		return fmt.Errorf("failed to start services: %w", err)
+	}
+
+	return nil
+}
+
+// DeployAppMonitoring deploys the monitoring stack (cAdvisor + node-exporter) to an app server.
+// This should be called during initial deployment and when scaling up, but not during redeploy-app.
+func (d *Deployer) DeployAppMonitoring(server *models.Server) error {
+	sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to connect via SSH: %w", err)
+	}
+	defer sshClient.Close()
+
+	// Render monitoring compose template
+	monitoringCompose, err := RenderAppMonitoringTemplate(d.config.Monitoring.CAdvisor.Port, d.config.Monitoring.NodeExporter.Port)
+	if err != nil {
+		return fmt.Errorf("failed to render monitoring template: %w", err)
+	}
+
+	// Write monitoring compose file
+	if err := sshClient.WriteFile("/var/lib/harbor/docker-compose.monitoring.yml", monitoringCompose); err != nil {
+		return fmt.Errorf("failed to write monitoring compose file: %w", err)
+	}
+
+	// Start monitoring services
+	composeCmd := "cd /var/lib/harbor && PATH=/opt/bin:$PATH docker-compose -f docker-compose.monitoring.yml up -d"
+	if _, err := sshClient.Execute(composeCmd); err != nil {
+		return fmt.Errorf("failed to start monitoring services: %w", err)
 	}
 
 	return nil
@@ -1239,6 +1285,12 @@ func (d *Deployer) DeployToServer(serverIP string, roleLabel string, controlPlan
 		d.log("info", fmt.Sprintf("Deploying app services on %s...", serverIP))
 		if err := d.DeployAppServer(server); err != nil {
 			return fmt.Errorf("failed to deploy app server: %w", err)
+		}
+
+		// Deploy monitoring stack
+		d.log("info", fmt.Sprintf("Deploying monitoring on %s...", serverIP))
+		if err := d.DeployAppMonitoring(server); err != nil {
+			return fmt.Errorf("failed to deploy monitoring: %w", err)
 		}
 	default:
 		return fmt.Errorf("unsupported role: %s", roleLabel)

@@ -178,6 +178,13 @@ func (m *ManualScaler) ScaleUp(ctx context.Context, role string, poolName string
 				return fmt.Errorf("failed to deploy app server %s: %w", server.Name, err)
 			}
 			fmt.Printf("[info] ✓ App deployed on %s\n", server.Name)
+
+			// Deploy monitoring stack
+			fmt.Printf("[info] Deploying monitoring on %s\n", server.Name)
+			if err := m.deployer.DeployAppMonitoring(server); err != nil {
+				return fmt.Errorf("failed to deploy monitoring on %s: %w", server.Name, err)
+			}
+			fmt.Printf("[info] ✓ Monitoring deployed on %s\n", server.Name)
 		}
 	}
 

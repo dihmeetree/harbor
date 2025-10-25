@@ -68,7 +68,7 @@ services:
   # cAdvisor
   cadvisor:
     container_name: cadvisor
-    image: gcr.io/cadvisor/cadvisor:latest
+    image: gcr.io/cadvisor/cadvisor:v0.52.0
     restart: always
     ports:
       - '0.0.0.0:{{.CAdvisorPort}}:8080'
@@ -83,7 +83,7 @@ services:
   # Node Exporter
   node-exporter:
     container_name: node-exporter
-    image: prom/node-exporter:v1.9.1
+    image: prom/node-exporter:v1.10.1
     restart: always
     ports:
       - '0.0.0.0:{{.NodeExporterPort}}:9100'
@@ -187,7 +187,7 @@ services:
   # cAdvisor
   cadvisor:
     container_name: cadvisor
-    image: gcr.io/cadvisor/cadvisor:latest
+    image: gcr.io/cadvisor/cadvisor:v0.52.0
     restart: always
     ports:
       - '0.0.0.0:{{.CAdvisorPort}}:8080'
@@ -202,7 +202,7 @@ services:
   # Node Exporter
   node-exporter:
     container_name: node-exporter
-    image: prom/node-exporter:v1.9.1
+    image: prom/node-exporter:v1.10.1
     restart: always
     ports:
       - '0.0.0.0:{{.NodeExporterPort}}:9100'
@@ -215,26 +215,15 @@ networks:
     driver: bridge
 `
 
-// AppServerTemplate is the docker-compose template for app servers
-const AppServerTemplate = `version: '3.8'
+// AppMonitoringTemplate is the docker-compose template for monitoring on app servers
+// This is deployed alongside the user's docker-compose.yml to provide metrics collection
+const AppMonitoringTemplate = `version: '3.8'
 
 services:
-  # Application
-  app:
-    container_name: app
-    image: {{.AppImage}}
-    restart: always
-    ports:
-      - '0.0.0.0:80:80'
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-    networks:
-      - apisix
-
-  # cAdvisor
+  # cAdvisor - Container metrics
   cadvisor:
     container_name: cadvisor
-    image: gcr.io/cadvisor/cadvisor:latest
+    image: gcr.io/cadvisor/cadvisor:v0.52.0
     restart: always
     ports:
       - '0.0.0.0:{{.CAdvisorPort}}:8080'
@@ -244,21 +233,21 @@ services:
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
     networks:
-      - apisix
+      - monitoring
 
-  # Node Exporter
+  # Node Exporter - System metrics
   node-exporter:
     container_name: node-exporter
-    image: prom/node-exporter:v1.9.1
+    image: prom/node-exporter:v1.10.1
     restart: always
     ports:
       - '0.0.0.0:{{.NodeExporterPort}}:9100'
     pid: host
     networks:
-      - apisix
+      - monitoring
 
 networks:
-  apisix:
+  monitoring:
     driver: bridge
 `
 
@@ -470,4 +459,17 @@ func RenderTemplate(tmpl string, data interface{}) (string, error) {
 	}
 
 	return buf.String(), nil
+}
+
+// RenderAppMonitoringTemplate renders the monitoring docker-compose template for app servers
+func RenderAppMonitoringTemplate(cAdvisorPort, nodeExporterPort int) (string, error) {
+	data := struct {
+		CAdvisorPort     int
+		NodeExporterPort int
+	}{
+		CAdvisorPort:     cAdvisorPort,
+		NodeExporterPort: nodeExporterPort,
+	}
+
+	return RenderTemplate(AppMonitoringTemplate, data)
 }
