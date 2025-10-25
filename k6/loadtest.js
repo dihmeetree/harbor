@@ -11,9 +11,6 @@ const targets = __ENV.LB_TARGETS
   : ["http://localhost"];
 const targetPath = __ENV.TARGET_PATH || "/";
 
-// Round-robin counter (shared across VUs)
-let currentTargetIndex = 0;
-
 // Configuration from environment variables
 export const options = {
   scenarios: {
@@ -37,9 +34,12 @@ export const options = {
 
 // Main test function
 export default function () {
-  // Round-robin load balancer selection
-  const target = targets[currentTargetIndex % targets.length];
-  currentTargetIndex++;
+  // Round-robin using VU ID and iteration count
+  // This ensures even distribution: each VU alternates between targets
+  const vuId = __VU;
+  const iter = __ITER;
+  const targetIndex = (vuId + iter) % targets.length;
+  const target = targets[targetIndex];
   const url = `${target}${targetPath}`;
 
   const params = {
