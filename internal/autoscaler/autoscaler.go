@@ -106,17 +106,13 @@ func (a *Autoscaler) checkAndScale(ctx context.Context) error {
 	a.log("info", "Running autoscaler check cycle...")
 
 	// Check load balancer pool
-	if a.config.LoadBalancer.Enabled {
-		if err := a.checkPool(ctx, "lb", "loadbalancer"); err != nil {
-			a.log("warn", fmt.Sprintf("Failed to check LB pool: %v", err))
-		}
+	if err := a.checkPool(ctx, "lb", "loadbalancer"); err != nil {
+		a.log("warn", fmt.Sprintf("Failed to check LB pool: %v", err))
 	}
 
 	// Check app pool
-	if a.config.App.Enabled {
-		if err := a.checkPool(ctx, "app", "app"); err != nil {
-			a.log("warn", fmt.Sprintf("Failed to check app pool: %v", err))
-		}
+	if err := a.checkPool(ctx, "app", "app"); err != nil {
+		a.log("warn", fmt.Sprintf("Failed to check app pool: %v", err))
 	}
 
 	a.log("info", "Autoscaler check cycle completed")

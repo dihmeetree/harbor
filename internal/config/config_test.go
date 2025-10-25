@@ -29,13 +29,14 @@ network:
 firewall:
   name: "test-firewall"
   rules: []
-container:
-  name: "nginx"
-  image: "nginx:latest"
 loadbalancer:
-  enabled: false
+  replicas: 1
+  server_type: "cx11"
+  location: "nbg1"
 app:
-  enabled: false
+  replicas: 1
+  server_type: "cx11"
+  location: "nbg1"
 apisix:
   admin_port: 9180
   api_key: "test-key"
@@ -123,13 +124,16 @@ firewall:
   name: "test-firewall"
   rules: []
 loadbalancer:
-  enabled: true
   replicas: 0
+  server_type: "cx11"
+  location: "nbg1"
 app:
-  enabled: false
+  replicas: 1
+  server_type: "cx11"
+  location: "nbg1"
 `,
 			wantError: true,
-			errorMsg:  "load balancer pool replicas must be at least 1",
+			errorMsg:  "load balancer replicas must be at least 1",
 		},
 		{
 			name: "invalid app replicas",
@@ -148,13 +152,16 @@ firewall:
   name: "test-firewall"
   rules: []
 loadbalancer:
-  enabled: false
+  replicas: 1
+  server_type: "cx11"
+  location: "nbg1"
 app:
-  enabled: true
   replicas: 0
+  server_type: "cx11"
+  location: "nbg1"
 `,
 			wantError: true,
-			errorMsg:  "app pool replicas must be at least 1",
+			errorMsg:  "app replicas must be at least 1",
 		},
 	}
 
@@ -204,20 +211,24 @@ func TestValidate(t *testing.T) {
 		{
 			name: "valid digitalocean config",
 			config: Config{
-				Provider: "digitalocean",
-				Control:  ServerConfig{Name: "test-control"},
-				Network:  NetworkConfig{Name: "test-network"},
-				Firewall: FirewallConfig{Name: "test-firewall"},
+				Provider:     "digitalocean",
+				Control:      ServerConfig{Name: "test-control"},
+				Network:      NetworkConfig{Name: "test-network"},
+				Firewall:     FirewallConfig{Name: "test-firewall"},
+				LoadBalancer: PoolConfig{Replicas: 1},
+				App:          PoolConfig{Replicas: 1},
 			},
 			wantError: false,
 		},
 		{
 			name: "valid hetzner config",
 			config: Config{
-				Provider: "hetzner",
-				Control:  ServerConfig{Name: "test-control"},
-				Network:  NetworkConfig{Name: "test-network"},
-				Firewall: FirewallConfig{Name: "test-firewall"},
+				Provider:     "hetzner",
+				Control:      ServerConfig{Name: "test-control"},
+				Network:      NetworkConfig{Name: "test-network"},
+				Firewall:     FirewallConfig{Name: "test-firewall"},
+				LoadBalancer: PoolConfig{Replicas: 1},
+				App:          PoolConfig{Replicas: 1},
 			},
 			wantError: false,
 		},
@@ -230,24 +241,26 @@ func TestValidate(t *testing.T) {
 			errorMsg:  "invalid provider",
 		},
 		{
-			name: "loadbalancer enabled with valid replicas",
+			name: "loadbalancer with valid replicas",
 			config: Config{
 				Provider:     "hetzner",
 				Control:      ServerConfig{Name: "test-control"},
 				Network:      NetworkConfig{Name: "test-network"},
 				Firewall:     FirewallConfig{Name: "test-firewall"},
-				LoadBalancer: PoolConfig{Enabled: true, Replicas: 2},
+				LoadBalancer: PoolConfig{Replicas: 2},
+				App:          PoolConfig{Replicas: 1},
 			},
 			wantError: false,
 		},
 		{
-			name: "app enabled with valid replicas",
+			name: "app with valid replicas",
 			config: Config{
-				Provider: "hetzner",
-				Control:  ServerConfig{Name: "test-control"},
-				Network:  NetworkConfig{Name: "test-network"},
-				Firewall: FirewallConfig{Name: "test-firewall"},
-				App:      PoolConfig{Enabled: true, Replicas: 3},
+				Provider:     "hetzner",
+				Control:      ServerConfig{Name: "test-control"},
+				Network:      NetworkConfig{Name: "test-network"},
+				Firewall:     FirewallConfig{Name: "test-firewall"},
+				LoadBalancer: PoolConfig{Replicas: 1},
+				App:          PoolConfig{Replicas: 3},
 			},
 			wantError: false,
 		},
@@ -303,13 +316,14 @@ network:
 firewall:
   name: "test-firewall"
   rules: []
-container:
-  name: "nginx"
-  image: "nginx:latest"
 loadbalancer:
-  enabled: false
+  replicas: 1
+  server_type: "cx11"
+  location: "nbg1"
 app:
-  enabled: false
+  replicas: 1
+  server_type: "cx11"
+  location: "nbg1"
 apisix:
   admin_port: 9180
   api_key: "test-key"

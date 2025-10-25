@@ -40,16 +40,16 @@ firewall:
 
 # Load Balancer (APISIX Data Planes)
 # These servers run APISIX Data Plane, cAdvisor, and node-exporter
+# At least 1 replica is required
 loadbalancer:
-  enabled: true
   replicas: 2 # Number of data plane servers
   server_type: "ccx13" # Smaller instances for load balancers
   location: "ash"
 
 # Application configuration
 # These servers run your application containers using docker-compose
+# At least 1 replica is required
 app:
-  enabled: true
   replicas: 2
   server_type: "ccx13"
   location: "ash"

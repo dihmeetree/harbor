@@ -53,7 +53,6 @@ type FirewallRule struct {
 
 // PoolConfig represents a server pool configuration
 type PoolConfig struct {
-	Enabled     bool   `yaml:"enabled"`
 	Replicas    int    `yaml:"replicas"`
 	ServerType  string `yaml:"server_type"`
 	Location    string `yaml:"location"`
@@ -188,12 +187,12 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("firewall name is required")
 	}
 
-	if c.LoadBalancer.Enabled && c.LoadBalancer.Replicas < 1 {
-		return fmt.Errorf("load balancer pool replicas must be at least 1")
+	if c.LoadBalancer.Replicas < 1 {
+		return fmt.Errorf("load balancer replicas must be at least 1")
 	}
 
-	if c.App.Enabled && c.App.Replicas < 1 {
-		return fmt.Errorf("app pool replicas must be at least 1")
+	if c.App.Replicas < 1 {
+		return fmt.Errorf("app replicas must be at least 1")
 	}
 
 	return nil

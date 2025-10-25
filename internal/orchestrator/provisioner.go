@@ -78,39 +78,35 @@ func (p *Provisioner) Provision(ctx context.Context) error {
 	p.log("info", fmt.Sprintf("Control plane server created: %s (%s)", controlPlane.Name, publicIP))
 
 	// Create data plane servers
-	if p.config.LoadBalancer.Enabled {
-		for i := 0; i < p.config.LoadBalancer.Replicas; i++ {
-			serverCfg := config.ServerConfig{
-				Name:     fmt.Sprintf("%s-lb-%d", baseName, i+1),
-				Type:     p.config.LoadBalancer.ServerType,
-				Location: p.config.LoadBalancer.Location,
-			}
-
-			server, err := p.createServer(ctx, serverCfg, models.RoleDataPlane, network, firewall, sshKey)
-			if err != nil {
-				return fmt.Errorf("failed to create data plane server %d: %w", i+1, err)
-			}
-			publicIP := server.PublicNet.IPv4.IP.String()
-			p.log("info", fmt.Sprintf("Data plane server created: %s (%s)", server.Name, publicIP))
+	for i := 0; i < p.config.LoadBalancer.Replicas; i++ {
+		serverCfg := config.ServerConfig{
+			Name:     fmt.Sprintf("%s-lb-%d", baseName, i+1),
+			Type:     p.config.LoadBalancer.ServerType,
+			Location: p.config.LoadBalancer.Location,
 		}
+
+		server, err := p.createServer(ctx, serverCfg, models.RoleDataPlane, network, firewall, sshKey)
+		if err != nil {
+			return fmt.Errorf("failed to create data plane server %d: %w", i+1, err)
+		}
+		publicIP := server.PublicNet.IPv4.IP.String()
+		p.log("info", fmt.Sprintf("Data plane server created: %s (%s)", server.Name, publicIP))
 	}
 
 	// Create app pool servers
-	if p.config.App.Enabled {
-		for i := 0; i < p.config.App.Replicas; i++ {
-			serverCfg := config.ServerConfig{
-				Name:     fmt.Sprintf("%s-app-%d", baseName, i+1),
-				Type:     p.config.App.ServerType,
-				Location: p.config.App.Location,
-			}
-
-			server, err := p.createServer(ctx, serverCfg, models.RoleApp, network, firewall, sshKey)
-			if err != nil {
-				return fmt.Errorf("failed to create app server %d: %w", i+1, err)
-			}
-			publicIP := server.PublicNet.IPv4.IP.String()
-			p.log("info", fmt.Sprintf("App server created: %s (%s)", server.Name, publicIP))
+	for i := 0; i < p.config.App.Replicas; i++ {
+		serverCfg := config.ServerConfig{
+			Name:     fmt.Sprintf("%s-app-%d", baseName, i+1),
+			Type:     p.config.App.ServerType,
+			Location: p.config.App.Location,
 		}
+
+		server, err := p.createServer(ctx, serverCfg, models.RoleApp, network, firewall, sshKey)
+		if err != nil {
+			return fmt.Errorf("failed to create app server %d: %w", i+1, err)
+		}
+		publicIP := server.PublicNet.IPv4.IP.String()
+		p.log("info", fmt.Sprintf("App server created: %s (%s)", server.Name, publicIP))
 	}
 
 	// Store private key path for later use

@@ -172,15 +172,12 @@ firewall:
       description: "HTTPS from anywhere"
 
 loadbalancer:
-  enabled: true
-  replicas: 1
+  replicas: 1  # At least 1 required
   server_type: "ccx13"
   location: "ash"
-  service_name: "apisix-data-plane"
 
 app:
-  enabled: true
-  replicas: 1
+  replicas: 1  # At least 1 required
   server_type: "ccx13"
   location: "ash"
   compose_file: "./docker-compose.yml"  # Path to your docker-compose file
