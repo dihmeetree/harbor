@@ -11,6 +11,9 @@ const targets = __ENV.LB_TARGETS
   : ["http://localhost"];
 const targetPath = __ENV.TARGET_PATH || "/";
 
+// Round-robin counter (shared across VUs)
+let currentTargetIndex = 0;
+
 // Configuration from environment variables
 export const options = {
   scenarios: {
@@ -35,7 +38,8 @@ export const options = {
 // Main test function
 export default function () {
   // Round-robin load balancer selection
-  const target = targets[Math.floor(Math.random() * targets.length)];
+  const target = targets[currentTargetIndex % targets.length];
+  currentTargetIndex++;
   const url = `${target}${targetPath}`;
 
   const params = {
