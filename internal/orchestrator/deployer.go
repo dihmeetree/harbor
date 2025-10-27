@@ -1130,6 +1130,20 @@ func (d *Deployer) RestartK6(ctx context.Context) error {
 	}
 	defer sshClient.Close()
 
+	// Copy k6 load test script if it exists
+	k6ScriptPath := "k6/loadtest.js"
+	if _, err := os.Stat(k6ScriptPath); err == nil {
+		d.log("info", "Copying k6 load test script to control plane...")
+		// Create k6 directory
+		if _, err := sshClient.Execute("sudo mkdir -p /var/lib/harbor/k6 && sudo chown -R $USER:$USER /var/lib/harbor"); err != nil {
+			return fmt.Errorf("failed to create k6 directory: %w", err)
+		}
+		if err := sshClient.CopyFile(k6ScriptPath, "/var/lib/harbor/k6/loadtest.js"); err != nil {
+			return fmt.Errorf("failed to copy k6 script: %w", err)
+		}
+		d.log("info", "✓ k6 script copied to control plane")
+	}
+
 	// Build LB_TARGETS comma-separated list
 	var targets []string
 	for _, dp := range dataPlanes {
@@ -1239,6 +1253,38 @@ func (d *Deployer) RestartGrafana(ctx context.Context) error {
 		return fmt.Errorf("failed to connect to control plane: %w", err)
 	}
 	defer sshClient.Close()
+
+	// Copy Grafana configuration files if they exist
+	// Copy provisioning directory
+	if _, err := os.Stat("grafana/provisioning"); err == nil {
+		d.log("info", "Copying Grafana provisioning directory...")
+		if err := sshClient.CopyDir("grafana/provisioning", "/var/lib/harbor/grafana/provisioning"); err != nil {
+			return fmt.Errorf("failed to copy grafana provisioning directory: %w", err)
+		}
+		d.log("info", "✓ Grafana provisioning directory copied")
+	}
+
+	// Copy dashboards directory
+	if _, err := os.Stat("grafana/dashboards"); err == nil {
+		d.log("info", "Copying Grafana dashboards directory...")
+		if err := sshClient.CopyDir("grafana/dashboards", "/var/lib/harbor/grafana/dashboards"); err != nil {
+			return fmt.Errorf("failed to copy grafana dashboards directory: %w", err)
+		}
+		d.log("info", "✓ Grafana dashboards directory copied")
+	}
+
+	// Copy grafana.ini if it exists
+	if _, err := os.Stat("grafana/config/grafana.ini"); err == nil {
+		d.log("info", "Copying Grafana configuration file...")
+		// Ensure config directory exists
+		if _, err := sshClient.Execute("sudo mkdir -p /var/lib/harbor/grafana/config && sudo chown -R $USER:$USER /var/lib/harbor"); err != nil {
+			return fmt.Errorf("failed to create grafana config directory: %w", err)
+		}
+		if err := sshClient.CopyFile("grafana/config/grafana.ini", "/var/lib/harbor/grafana/config/grafana.ini"); err != nil {
+			return fmt.Errorf("failed to copy grafana.ini: %w", err)
+		}
+		d.log("info", "✓ Grafana configuration file copied")
+	}
 
 	// Restart Grafana using docker-compose
 	d.log("info", "Restarting Grafana container...")
