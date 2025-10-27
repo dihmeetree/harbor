@@ -385,32 +385,34 @@ func (p *Provisioner) Destroy(ctx context.Context) error {
 		}
 	}
 
-	// 2. Delete firewalls with managed=harbor label (with retry for "still in use" errors)
-	// Note: We need to list all firewalls and filter by name since Hetzner API doesn't support label filtering for firewalls
-	// For now, we'll use the firewall name from config to find it
+	// 2. Delete firewall by name
 	if p.config.Firewall.Name != "" {
 		p.log("info", fmt.Sprintf("Deleting firewall: %s", p.config.Firewall.Name))
-
-		// Try to find firewall by querying - we'll need to scan or use a helper
-		// For simplicity, let's just try to delete by reconstructing the expected ID pattern
-		// This is a known limitation - in production you'd want better firewall tracking
-
-		// Actually, let's query all servers to find any firewall attached to them
-		// But servers are already deleted... so we'll try a direct deletion approach
-		// Since we don't have the firewall ID, we'll need to search
-
-		// Simplified: Delete all firewalls (Hetzner API will prevent deleting if in use)
-		// This is acceptable since Harbor should only create one firewall
-
-		p.log("warn", "Firewall deletion by name not yet implemented - manually delete if needed")
+		firewall, err := p.hetzner.GetFirewallByName(ctx, p.config.Firewall.Name)
+		if err == nil && firewall != nil {
+			if err := p.hetzner.DeleteFirewall(ctx, firewall.ID); err != nil {
+				p.log("error", fmt.Sprintf("Failed to delete firewall %s: %v", p.config.Firewall.Name, err))
+			} else {
+				p.log("info", fmt.Sprintf("✓ Deleted firewall: %s", p.config.Firewall.Name))
+			}
+		} else if err != nil {
+			p.log("warn", fmt.Sprintf("Firewall %s not found or already deleted", p.config.Firewall.Name))
+		}
 	}
 
-	// 3. Delete networks by name
+	// 3. Delete network by name
 	if p.config.Network.Name != "" {
 		p.log("info", fmt.Sprintf("Deleting network: %s", p.config.Network.Name))
-		// Similar issue - we need network ID, not just name
-		// For now, log a warning
-		p.log("warn", "Network deletion by name not yet implemented - manually delete if needed")
+		network, err := p.hetzner.GetNetworkByName(ctx, p.config.Network.Name)
+		if err == nil && network != nil {
+			if err := p.hetzner.DeleteNetwork(ctx, network.ID); err != nil {
+				p.log("error", fmt.Sprintf("Failed to delete network %s: %v", p.config.Network.Name, err))
+			} else {
+				p.log("info", fmt.Sprintf("✓ Deleted network: %s", p.config.Network.Name))
+			}
+		} else if err != nil {
+			p.log("warn", fmt.Sprintf("Network %s not found or already deleted", p.config.Network.Name))
+		}
 	}
 
 	// 4. Delete SSH keys by name pattern
@@ -426,6 +428,5 @@ func (p *Provisioner) Destroy(ctx context.Context) error {
 	}
 
 	p.log("info", "✓ Infrastructure destruction completed")
-	p.log("warn", "Note: Networks and firewalls may need manual cleanup via Hetzner console")
 	return nil
 }
