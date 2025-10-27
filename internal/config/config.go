@@ -148,6 +148,8 @@ type K6Config struct {
 	ConnectionTimeout string `yaml:"connection_timeout"` // Connection timeout (default: "10s")
 	RequestTimeout    string `yaml:"request_timeout"`    // Request timeout (default: "30s")
 	GracefulStop      string `yaml:"graceful_stop"`      // Graceful stop duration (default: "30s")
+	CPULimit          string `yaml:"cpu_limit"`          // CPU limit (e.g., "2.0" for 2 cores, default: no limit)
+	MemoryLimit       string `yaml:"memory_limit"`       // Memory limit (e.g., "2g", "512m", default: no limit)
 }
 
 // Load loads configuration from a YAML file

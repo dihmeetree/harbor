@@ -707,10 +707,25 @@ func (a *Autoscaler) updateK6Config(ctx context.Context) error {
 	// Apply defaults for k6 config
 	orchestrator.ApplyK6Defaults(&a.config.K6)
 
-	// Run k6 with updated targets
+	// Build docker run command with resource limits if configured
 	runCmd := fmt.Sprintf(`docker run -d --name k6 \
 		--network %s \
-		--restart always \
+		--restart always`, networkName)
+
+	// Add CPU limit if configured
+	if a.config.K6.CPULimit != "" {
+		runCmd += fmt.Sprintf(` \
+		--cpus "%s"`, a.config.K6.CPULimit)
+	}
+
+	// Add memory limit if configured
+	if a.config.K6.MemoryLimit != "" {
+		runCmd += fmt.Sprintf(` \
+		--memory "%s"`, a.config.K6.MemoryLimit)
+	}
+
+	// Add remaining flags and environment variables
+	runCmd += fmt.Sprintf(` \
 		-e "LB_TARGETS=%s" \
 		-e "RATE=%d" \
 		-e "DURATION=%s" \
@@ -722,7 +737,6 @@ func (a *Autoscaler) updateK6Config(ctx context.Context) error {
 		-e "GRACEFUL_STOP=%s" \
 		-v /var/lib/harbor/k6:/scripts:ro \
 		grafana/k6:latest run /scripts/loadtest.js`,
-		networkName,
 		lbTargets,
 		a.config.K6.Rate,
 		a.config.K6.Duration,

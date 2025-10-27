@@ -564,6 +564,8 @@ func (d *Deployer) DeployControlPlaneWithServers(server *models.Server, dataPlan
 		K6RequestTimeout:    k6Config.RequestTimeout,
 		K6GracefulStop:      k6Config.GracefulStop,
 		K6LBTargets:         k6LBTargets,
+		K6CPULimit:          k6Config.CPULimit,
+		K6MemoryLimit:       k6Config.MemoryLimit,
 	}
 
 	// Render and deploy docker-compose
