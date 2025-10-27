@@ -186,18 +186,21 @@ firewall:
 # Validate config before deploying
 harbor validate
 
-# Show deployment logs
-harbor logs --follow
+# Redeploy app services with zero downtime (blue-green deployment)
+harbor redeploy                # Redeploy all services
+harbor redeploy nginx          # Redeploy specific service
+harbor redeploy --yes          # Skip confirmation
 
-# Scale data planes (coming soon)
-harbor scale --data-planes 5
+# Scale servers manually
+harbor scale lb 5              # Scale load balancers to 5
+harbor scale app 10            # Scale app servers to 10
 
-# SSH into a server (coming soon)
-harbor ssh control-plane
+# k6 load testing
+harbor k6 restart              # Restart k6 with latest config
+harbor k6 stop                 # Stop load testing
 
-# Update APISIX routes (coming soon)
-harbor apisix routes list
-harbor apisix routes create
+# Show infrastructure status
+harbor status
 ```
 
 ## Troubleshooting

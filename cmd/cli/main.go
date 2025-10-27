@@ -35,7 +35,6 @@ load balancers, and observability stacks.`,
 	rootCmd.AddCommand(validateCmd())
 	rootCmd.AddCommand(deployCmd())
 	rootCmd.AddCommand(redeployCmd())
-	rootCmd.AddCommand(redeployAppCmd())
 	rootCmd.AddCommand(statusCmd())
 	rootCmd.AddCommand(scaleCmd())
 	rootCmd.AddCommand(k6Cmd())
@@ -138,10 +137,43 @@ func deployCmd() *cobra.Command {
 
 func redeployCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "redeploy",
-		Short: "Redeploy services to existing infrastructure",
-		Long:  "Redeploys Docker containers and APISIX configuration to existing servers without recreating infrastructure",
+		Use:   "redeploy [service]",
+		Short: "Redeploy app services using blue-green strategy",
+		Long: `Redeploy services from docker-compose.yml to app servers using zero-downtime blue-green deployment.
+
+Examples:
+  harbor redeploy           # Redeploy all services
+  harbor redeploy nginx     # Redeploy only the nginx service
+  harbor redeploy api       # Redeploy only the api service
+
+This command performs a rolling blue-green deployment across all app servers, ensuring zero downtime.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Determine which service to redeploy
+			var serviceName string
+			if len(args) > 0 {
+				serviceName = args[0]
+			}
+
+			// Require confirmation unless --yes flag is set
+			yes, _ := cmd.Flags().GetBool("yes")
+			if !yes {
+				if serviceName != "" {
+					fmt.Printf("This will redeploy the '%s' service using blue-green strategy.\n", serviceName)
+					fmt.Println("App servers will be updated one at a time with zero downtime.")
+				} else {
+					fmt.Println("This will redeploy ALL app services using blue-green strategy.")
+					fmt.Println("App servers will be updated one at a time with zero downtime.")
+				}
+				fmt.Print("Continue? (yes/no): ")
+				var response string
+				_, _ = fmt.Scanln(&response)
+				if response != "yes" {
+					fmt.Println("Aborted")
+					return nil
+				}
+			}
+
 			// Load config
 			cfg, err := config.Load(cfgFile)
 			if err != nil {
@@ -179,71 +211,21 @@ func redeployCmd() *cobra.Command {
 
 			deployer := orchestrator.NewDeployer(cfg, token, privateKeyPath)
 
-			// Deploy services only
-			if err := deployer.DeployServicesOnly(ctx); err != nil {
+			// Redeploy app servers with optional service filter
+			if err := deployer.RedeployAppServers(ctx, serviceName); err != nil {
 				return fmt.Errorf("redeployment failed: %w", err)
 			}
 
+			if serviceName != "" {
+				fmt.Printf("[info] ✓ Service '%s' redeployed successfully!\n", serviceName)
+			} else {
+				fmt.Println("[info] ✓ All services redeployed successfully!")
+			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&composeFile, "compose-file", "", "Path to docker-compose.yml for app servers (overrides config)")
-	return cmd
-}
-
-func redeployAppCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "redeploy-app",
-		Short: "Redeploy only app servers",
-		Long:  "Stops and redeploys only the app servers using docker-compose without affecting other infrastructure",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// Load config
-			cfg, err := config.Load(cfgFile)
-			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Override compose file if flag is set
-			if composeFile != "" {
-				cfg.App.ComposeFile = composeFile
-			}
-
-			// Get Hetzner API token
-			token, err := cli.RequireEnvVar("HETZNER_API_TOKEN")
-			if err != nil {
-				return err
-			}
-
-			// Check if infrastructure exists by querying Hetzner
-			ctx := context.Background()
-			hetznerClient := hetzner.New(token)
-			servers, err := hetznerClient.GetServersByLabel(ctx, "managed", "harbor")
-			if err != nil {
-				return fmt.Errorf("failed to query servers from Hetzner: %w", err)
-			}
-
-			if len(servers) == 0 {
-				return fmt.Errorf("no infrastructure found - run 'harbor deploy' first")
-			}
-
-			// Get SSH key path
-			privateKeyPath, err := cli.ResolveSshKeyPath(cfg)
-			if err != nil {
-				return err
-			}
-
-			deployer := orchestrator.NewDeployer(cfg, token, privateKeyPath)
-
-			// Redeploy only app servers
-			if err := deployer.RedeployAppServers(ctx); err != nil {
-				return fmt.Errorf("app server redeployment failed: %w", err)
-			}
-
-			fmt.Println("[info] ✓ App servers redeployed successfully!")
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&composeFile, "compose-file", "", "Path to docker-compose.yml for app servers (overrides config)")
+	cmd.Flags().BoolP("yes", "y", false, "Skip confirmation prompt")
 	return cmd
 }
 

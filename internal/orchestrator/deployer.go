@@ -161,10 +161,21 @@ func (d *Deployer) DeployServicesOnly(ctx context.Context) error {
 	return nil
 }
 
-// RedeployAppServers redeploys only the app servers by stopping containers and redeploying with docker-compose.
-// This performs a rolling deployment (one server at a time) to ensure zero downtime.
-func (d *Deployer) RedeployAppServers(ctx context.Context) error {
-	d.log("info", "Starting zero-downtime app server redeployment")
+// RedeployAppServers redeploys only the app servers using blue-green deployment strategy.
+// This performs a rolling deployment (one server at a time) with zero downtime by:
+// 1. Deploying new container on alternate port (blue=80, green=8080)
+// 2. Waiting for health checks to pass on new container
+// 3. Updating APISIX to route traffic to new port
+// 4. Stopping old container after traffic migration
+//
+// If serviceName is provided, only that specific service from docker-compose will be redeployed.
+// If serviceName is empty, all services will be redeployed.
+func (d *Deployer) RedeployAppServers(ctx context.Context, serviceName string) error {
+	if serviceName != "" {
+		d.log("info", fmt.Sprintf("Starting zero-downtime redeployment for service '%s' (blue-green strategy)", serviceName))
+	} else {
+		d.log("info", "Starting zero-downtime app server redeployment (blue-green strategy)")
+	}
 
 	// Get servers from Hetzner
 	d.log("info", "Querying Hetzner API for app servers...")
@@ -182,66 +193,111 @@ func (d *Deployer) RedeployAppServers(ctx context.Context) error {
 	}
 
 	controlPlane := controlPlanes[0]
-	d.log("info", fmt.Sprintf("Found %d app server(s) to redeploy (rolling deployment)", len(appServers)))
+	d.log("info", fmt.Sprintf("Found %d app server(s) to redeploy (blue-green rolling deployment)", len(appServers)))
 
 	// Log the compose file being used
 	if d.config.App.ComposeFile != "" {
 		d.log("info", fmt.Sprintf("Using docker-compose file: %s", d.config.App.ComposeFile))
 	}
 
-	// Deploy app servers one at a time (rolling deployment for zero downtime)
-	for i, server := range appServers {
-		d.log("info", fmt.Sprintf("[%d/%d] Redeploying %s", i+1, len(appServers), server.Name))
+	// Track server:port mappings for all servers
+	serverPorts := make(map[string]int)
 
-		// Remove this server from APISIX upstreams (so no traffic is routed to it)
-		d.log("info", fmt.Sprintf("  Removing %s from APISIX upstreams", server.Name))
-		remainingServers := make([]*models.Server, 0, len(appServers)-1)
-		for _, s := range appServers {
-			if s.Name != server.Name {
-				remainingServers = append(remainingServers, s)
-			}
-		}
-		if err := d.updateAPISIXUpstreamsWithServers(controlPlane, remainingServers); err != nil {
-			return fmt.Errorf("failed to remove %s from upstreams: %w", server.Name, err)
-		}
-
-		// Wait a moment for connections to drain
-		time.Sleep(2 * time.Second)
-
-		// Connect to server
-		sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
+	// Initialize with current server ports
+	for _, server := range appServers {
+		currentPort, err := d.discoverCurrentAppPort(server)
 		if err != nil {
-			return fmt.Errorf("failed to connect to %s: %w", server.Name, err)
+			d.log("warn", fmt.Sprintf("Failed to discover port for %s, defaulting to 80: %v", server.Name, err))
+			currentPort = 80
 		}
-
-		// Stop only user's app containers (not monitoring)
-		d.log("info", fmt.Sprintf("  Stopping app containers on %s", server.Name))
-		_, _ = sshClient.Execute("cd /var/lib/harbor && PATH=/opt/bin:$PATH docker-compose down 2>/dev/null || true")
-		sshClient.Close()
-
-		// Deploy to this server
-		d.log("info", fmt.Sprintf("  Deploying new version to %s", server.Name))
-		if err := d.DeployAppServer(server); err != nil {
-			return fmt.Errorf("failed to deploy app on %s: %w", server.Name, err)
+		if currentPort == 0 {
+			// No container running, use port 80 as default
+			currentPort = 80
 		}
-
-		// Wait for health check before moving to next server
-		d.log("info", fmt.Sprintf("  Waiting for %s to be healthy...", server.Name))
-		if err := d.waitForServerHealth(server); err != nil {
-			return fmt.Errorf("server %s failed health check: %w", server.Name, err)
-		}
-
-		// Add this server back to APISIX upstreams
-		d.log("info", fmt.Sprintf("  Adding %s back to APISIX upstreams", server.Name))
-		// Include all servers up to and including the current one (all previously deployed + current)
-		deployedServers := appServers[:i+1]
-		if err := d.updateAPISIXUpstreamsWithServers(controlPlane, deployedServers); err != nil {
-			return fmt.Errorf("failed to add %s back to upstreams: %w", server.Name, err)
-		}
-
-		d.log("info", fmt.Sprintf("✓ %s redeployed successfully", server.Name))
+		serverPorts[server.PrivateIP] = currentPort
+		d.log("info", fmt.Sprintf("  %s currently on port %d", server.Name, currentPort))
 	}
 
+	// Deploy app servers one at a time (blue-green rolling deployment)
+	for i, server := range appServers {
+		d.log("info", fmt.Sprintf("[%d/%d] Blue-green redeploying %s", i+1, len(appServers), server.Name))
+
+		// Discover current port (blue)
+		currentPort := serverPorts[server.PrivateIP]
+
+		// Determine new port (green) - alternate between 80 and 8080
+		var newPort int
+		if currentPort == 80 {
+			newPort = 8080
+		} else {
+			newPort = 80
+		}
+
+		d.log("info", fmt.Sprintf("  Current port (blue): %d, New port (green): %d", currentPort, newPort))
+
+		// Step 1: Deploy new container on green port
+		if serviceName != "" {
+			d.log("info", fmt.Sprintf("  Deploying service '%s' on port %d (green)", serviceName, newPort))
+		} else {
+			d.log("info", fmt.Sprintf("  Deploying new version on port %d (green)", newPort))
+		}
+		if err := d.DeployAppServerOnPort(server, newPort, serviceName); err != nil {
+			return fmt.Errorf("failed to deploy app on port %d for %s: %w", newPort, server.Name, err)
+		}
+
+		// Step 2: Wait for health check on new port
+		d.log("info", fmt.Sprintf("  Waiting for health check on port %d...", newPort))
+		if err := d.waitForServerHealthOnPort(server, newPort); err != nil {
+			// Health check failed - cleanup new container and abort
+			d.log("error", fmt.Sprintf("Health check failed on port %d: %v", newPort, err))
+			d.log("info", fmt.Sprintf("  Cleaning up failed deployment on port %d", newPort))
+			_ = d.stopAppContainersOnPort(server, newPort)
+			return fmt.Errorf("server %s failed health check on port %d: %w", server.Name, newPort, err)
+		}
+		d.log("info", fmt.Sprintf("  ✓ Health check passed on port %d", newPort))
+
+		// Step 3: Add new port to APISIX upstreams (additive update - both ports active)
+		d.log("info", fmt.Sprintf("  Adding port %d (green) to APISIX upstreams alongside port %d (blue)", newPort, currentPort))
+
+		// Update upstreams to include both ports (no service interruption)
+		if err := d.updateAPISIXUpstreamsWithDualPorts(controlPlane, serverPorts, server.PrivateIP, currentPort, newPort); err != nil {
+			// Failed to update APISIX - rollback by stopping new container
+			d.log("error", fmt.Sprintf("Failed to add new upstream: %v", err))
+			d.log("info", fmt.Sprintf("  Rolling back - stopping new container on port %d", newPort))
+			_ = d.stopAppContainersOnPort(server, newPort)
+			return fmt.Errorf("failed to update upstreams for %s: %w", server.Name, err)
+		}
+
+		// Step 4: Verify APISIX has detected the new backend
+		d.log("info", fmt.Sprintf("  Verifying APISIX has detected backend on port %d (green)", newPort))
+		if err := d.verifyAPISIXUpstreamHasBackend(controlPlane, server.PrivateIP, newPort); err != nil {
+			d.log("warn", fmt.Sprintf("Failed to verify APISIX backend (non-critical): %v", err))
+			// Continue anyway - we'll remove the old backend which will force traffic to new one
+		}
+
+		// Step 5: Remove old port from APISIX upstreams (only new port remains)
+		d.log("info", fmt.Sprintf("  Removing port %d (blue) from APISIX upstreams", currentPort))
+		serverPorts[server.PrivateIP] = newPort
+		if err := d.updateAPISIXUpstreamsWithServerPorts(controlPlane, serverPorts); err != nil {
+			d.log("warn", fmt.Sprintf("Failed to remove old upstream (non-critical): %v", err))
+			// Don't fail - new backend is already serving traffic
+		}
+
+		// Step 6: Wait for connections to drain from old container
+		d.log("info", fmt.Sprintf("  Waiting for connections to drain from port %d (blue)", currentPort))
+		time.Sleep(3 * time.Second)
+
+		// Step 7: Stop old container on blue port
+		d.log("info", fmt.Sprintf("  Stopping old container on port %d (blue)", currentPort))
+		if err := d.stopAppContainersOnPort(server, currentPort); err != nil {
+			d.log("warn", fmt.Sprintf("  Failed to stop old container on port %d: %v", currentPort, err))
+			// Continue anyway - new container is already serving traffic
+		}
+
+		d.log("info", fmt.Sprintf("✓ %s redeployed successfully (now on port %d)", server.Name, newPort))
+	}
+
+	d.log("info", "✓ All app servers redeployed successfully using blue-green strategy")
 	return nil
 }
 
@@ -909,6 +965,86 @@ func (d *Deployer) updateAPISIXUpstreamsWithServers(controlPlane *models.Server,
 	return nil
 }
 
+// updateAPISIXUpstreamsWithServerPorts updates APISIX upstreams with a specific list of app servers
+// and their custom port mappings. This is used during blue-green deployments.
+func (d *Deployer) updateAPISIXUpstreamsWithServerPorts(controlPlane *models.Server, serverPorts map[string]int) error {
+	// Connect to control plane via SSH
+	sshClient, err := ssh.New(controlPlane.PublicIP, d.sshUser, d.privateKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to connect to control plane: %w", err)
+	}
+	defer sshClient.Close()
+
+	// Create APISIX client that executes via SSH
+	adminURL := "http://127.0.0.1:9180"
+	apiKey := d.config.APISIX.APIKey
+	client := apisix.NewWithSSH(adminURL, apiKey, sshClient)
+
+	// Update upstreams with the provided server:port mappings
+	for _, upstream := range d.config.APISIX.Upstreams {
+		// Skip non-app upstreams
+		if upstream.ID == "grafana" {
+			continue
+		}
+
+		// Build nodes map with custom ports
+		nodes := make(map[string]int)
+		for serverIP, port := range serverPorts {
+			nodes[fmt.Sprintf("%s:%d", serverIP, port)] = 1
+		}
+
+		if err := client.CreateUpstream(upstream, nodes); err != nil {
+			return fmt.Errorf("failed to update upstream %s: %w", upstream.Name, err)
+		}
+	}
+
+	return nil
+}
+
+// updateAPISIXUpstreamsWithDualPorts updates APISIX upstreams to include both old and new ports
+// for a specific server during blue-green deployment. This ensures zero downtime by having
+// both backends available during the transition.
+func (d *Deployer) updateAPISIXUpstreamsWithDualPorts(controlPlane *models.Server, serverPorts map[string]int, transitioningIP string, oldPort, newPort int) error {
+	// Connect to control plane via SSH
+	sshClient, err := ssh.New(controlPlane.PublicIP, d.sshUser, d.privateKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to connect to control plane: %w", err)
+	}
+	defer sshClient.Close()
+
+	// Create APISIX client that executes via SSH
+	adminURL := "http://127.0.0.1:9180"
+	apiKey := d.config.APISIX.APIKey
+	client := apisix.NewWithSSH(adminURL, apiKey, sshClient)
+
+	// Update upstreams with both old and new ports for the transitioning server
+	for _, upstream := range d.config.APISIX.Upstreams {
+		// Skip non-app upstreams
+		if upstream.ID == "grafana" {
+			continue
+		}
+
+		// Build nodes map with all servers
+		nodes := make(map[string]int)
+		for serverIP, port := range serverPorts {
+			if serverIP == transitioningIP {
+				// For the transitioning server, add both old and new ports
+				nodes[fmt.Sprintf("%s:%d", serverIP, oldPort)] = 1
+				nodes[fmt.Sprintf("%s:%d", serverIP, newPort)] = 1
+			} else {
+				// For other servers, use their current port
+				nodes[fmt.Sprintf("%s:%d", serverIP, port)] = 1
+			}
+		}
+
+		if err := client.CreateUpstream(upstream, nodes); err != nil {
+			return fmt.Errorf("failed to update upstream %s with dual ports: %w", upstream.Name, err)
+		}
+	}
+
+	return nil
+}
+
 // UpdatePrometheusConfig updates the Prometheus scrape targets configuration.
 // This is used during scaling operations to add or remove servers from Prometheus monitoring.
 // After updating the configuration file, it triggers a hot reload of Prometheus.
@@ -1185,8 +1321,8 @@ func (d *Deployer) waitForServersReady(servers []*models.Server) error {
 	return nil
 }
 
-// waitForServerHealth waits for a single app server to respond to HTTP requests on port 80
-func (d *Deployer) waitForServerHealth(server *models.Server) error {
+// waitForServerHealthOnPort waits for a single app server to respond to HTTP requests on a specific port
+func (d *Deployer) waitForServerHealthOnPort(server *models.Server, port int) error {
 	sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to connect via SSH: %w", err)
@@ -1195,8 +1331,8 @@ func (d *Deployer) waitForServerHealth(server *models.Server) error {
 
 	// Try to connect to the app server for up to 60 seconds
 	for i := 0; i < 30; i++ {
-		// Check if the service is responding on port 80 via private IP
-		cmd := fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' http://%s:80 --connect-timeout 2", server.PrivateIP)
+		// Check if the service is responding on the specified port via private IP
+		cmd := fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' http://%s:%d --connect-timeout 2", server.PrivateIP, port)
 		output, err := sshClient.Execute(cmd)
 		if err == nil && (output == "200" || output == "301" || output == "302") {
 			return nil // Health check passed
@@ -1204,7 +1340,231 @@ func (d *Deployer) waitForServerHealth(server *models.Server) error {
 		time.Sleep(2 * time.Second)
 	}
 
-	return fmt.Errorf("server did not become healthy after 60 seconds")
+	return fmt.Errorf("server did not become healthy on port %d after 60 seconds", port)
+}
+
+// discoverCurrentAppPort discovers which port the current app container is running on.
+// Returns the port number (80 or 8080), or 0 if no container is running.
+func (d *Deployer) discoverCurrentAppPort(server *models.Server) (int, error) {
+	sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to connect via SSH: %w", err)
+	}
+	defer sshClient.Close()
+
+	// Check for containers running on port 80 or 8080
+	// Use docker ps with format to get container ports
+	checkCmd := `docker ps --format '{{.Ports}}' | grep -E '0.0.0.0:(80|8080)->' | head -1 | sed -E 's/.*0.0.0.0:([0-9]+).*/\1/'`
+	output, err := sshClient.Execute(checkCmd)
+	if err != nil || strings.TrimSpace(output) == "" {
+		// No app container running
+		return 0, nil
+	}
+
+	port := strings.TrimSpace(output)
+	switch port {
+	case "80":
+		return 80, nil
+	case "8080":
+		return 8080, nil
+	}
+
+	return 0, fmt.Errorf("unexpected port discovered: %s", port)
+}
+
+// DeployAppServerOnPort deploys the user's application container to an app server on a specific port.
+// This is used for blue-green deployments where we need to run the new container on an alternate port.
+func (d *Deployer) DeployAppServerOnPort(server *models.Server, port int, serviceName string) error {
+	sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to connect via SSH: %w", err)
+	}
+	defer sshClient.Close()
+
+	// Create deployment directory
+	if _, err := sshClient.Execute("sudo mkdir -p /var/lib/harbor && sudo chown -R $USER:$USER /var/lib/harbor"); err != nil {
+		return fmt.Errorf("failed to create deployment directory: %w", err)
+	}
+
+	// Check if custom docker-compose file is specified
+	if d.config.App.ComposeFile == "" {
+		return fmt.Errorf("app.compose_file is required in config")
+	}
+
+	// Copy docker-compose.yml and all volume files
+	if err := CopyComposeFilesAndVolumes(sshClient, d.config.App.ComposeFile, "/var/lib/harbor", server.Name); err != nil {
+		return fmt.Errorf("failed to copy compose files and volumes: %w", err)
+	}
+
+	// Modify the docker-compose.yml to use the specified port
+	d.log("info", fmt.Sprintf("  Modifying compose file to use port %d", port))
+	modifyCmd := fmt.Sprintf(`sed -i 's/"80:80"/"%d:80"/g' /var/lib/harbor/docker-compose.yml`, port)
+	if _, err := sshClient.Execute(modifyCmd); err != nil {
+		return fmt.Errorf("failed to modify compose file for port %d: %w", port, err)
+	}
+
+	// Also handle single quotes format
+	modifyCmd2 := fmt.Sprintf(`sed -i "s/'80:80'/'%d:80'/g" /var/lib/harbor/docker-compose.yml`, port)
+	if _, err := sshClient.Execute(modifyCmd2); err != nil {
+		return fmt.Errorf("failed to modify compose file for port %d: %w", port, err)
+	}
+
+	// Also handle no-quotes format
+	modifyCmd3 := fmt.Sprintf(`sed -i 's/- 80:80/- %d:80/g' /var/lib/harbor/docker-compose.yml`, port)
+	if _, err := sshClient.Execute(modifyCmd3); err != nil {
+		return fmt.Errorf("failed to modify compose file for port %d: %w", port, err)
+	}
+
+	// Start user services (optionally filtered by service name)
+	if serviceName != "" {
+		// Deploy only the specified service using docker-compose up --no-deps
+		d.log("info", fmt.Sprintf("  Starting service: %s", serviceName))
+		composeCmd := fmt.Sprintf("cd /var/lib/harbor && PATH=/opt/bin:$PATH docker-compose up -d --no-deps --force-recreate %s", serviceName)
+		if _, err := sshClient.Execute(composeCmd); err != nil {
+			return fmt.Errorf("failed to start service %s: %w", serviceName, err)
+		}
+	} else {
+		// Start all services
+		if err := d.dockerClient.ComposeUp(sshClient, "/var/lib/harbor"); err != nil {
+			return fmt.Errorf("failed to start services: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// stopAppContainersOnPort gracefully stops app containers running on a specific port.
+// It sends SIGTERM to allow cleanup, waits for graceful shutdown, then removes containers.
+func (d *Deployer) stopAppContainersOnPort(server *models.Server, port int) error {
+	sshClient, err := ssh.New(server.PublicIP, d.sshUser, d.privateKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to connect via SSH: %w", err)
+	}
+	defer sshClient.Close()
+
+	// Find container IDs listening on the specified port
+	findCmd := fmt.Sprintf(`docker ps --format '{{.ID}} {{.Ports}}' | grep '0.0.0.0:%d->' | awk '{print $1}'`, port)
+	containerIDs, err := sshClient.Execute(findCmd)
+	if err != nil || strings.TrimSpace(containerIDs) == "" {
+		// No containers found, nothing to do
+		return nil
+	}
+
+	// Send SIGTERM for graceful shutdown (timeout: 10 seconds)
+	d.log("info", fmt.Sprintf("  Sending SIGTERM to containers on port %d for graceful shutdown", port))
+	stopCmd := fmt.Sprintf(`docker stop -t 10 %s`, strings.TrimSpace(containerIDs))
+	if _, err := sshClient.Execute(stopCmd); err != nil {
+		d.log("warn", fmt.Sprintf("  Failed to gracefully stop containers on port %d: %v", port, err))
+		// Force kill as fallback
+		d.log("info", fmt.Sprintf("  Force killing containers on port %d", port))
+		killCmd := fmt.Sprintf(`docker kill %s`, strings.TrimSpace(containerIDs))
+		_, _ = sshClient.Execute(killCmd)
+	}
+
+	// Wait a moment to ensure containers are fully stopped
+	time.Sleep(1 * time.Second)
+
+	// Verify containers are stopped
+	checkCmd := fmt.Sprintf(`docker ps --format '{{.ID}}' | grep -E '%s'`, strings.ReplaceAll(strings.TrimSpace(containerIDs), "\n", "|"))
+	stillRunning, _ := sshClient.Execute(checkCmd)
+	if strings.TrimSpace(stillRunning) != "" {
+		d.log("warn", fmt.Sprintf("  Some containers still running on port %d after stop", port))
+	}
+
+	// Remove stopped containers
+	d.log("info", fmt.Sprintf("  Removing stopped containers on port %d", port))
+	removeCmd := fmt.Sprintf(`docker rm -f %s`, strings.TrimSpace(containerIDs))
+	if _, err := sshClient.Execute(removeCmd); err != nil {
+		d.log("warn", fmt.Sprintf("  Failed to remove containers on port %d: %v", port, err))
+	}
+
+	return nil
+}
+
+// verifyAPISIXUpstreamHasBackend verifies that APISIX upstream includes the specified backend
+// by checking the upstream configuration via the Admin API. Retries for up to 30 seconds.
+func (d *Deployer) verifyAPISIXUpstreamHasBackend(controlPlane *models.Server, serverIP string, port int) error {
+	// Connect to control plane via SSH
+	sshClient, err := ssh.New(controlPlane.PublicIP, d.sshUser, d.privateKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to connect to control plane: %w", err)
+	}
+	defer sshClient.Close()
+
+	// Create APISIX client that executes via SSH
+	adminURL := "http://127.0.0.1:9180"
+	apiKey := d.config.APISIX.APIKey
+	client := apisix.NewWithSSH(adminURL, apiKey, sshClient)
+
+	// Retry up to 30 seconds checking all app upstreams
+	expectedBackend := fmt.Sprintf("%s:%d", serverIP, port)
+	maxAttempts := 15
+	interval := 2 * time.Second
+
+	// Retry until backend is found in at least one upstream or timeout
+	for i := range maxAttempts {
+		foundInAnyUpstream := false
+
+		// Check all app upstreams
+		for _, upstream := range d.config.APISIX.Upstreams {
+			// Skip non-app upstreams
+			if upstream.ID == "grafana" {
+				continue
+			}
+
+			upstreamData, err := client.GetUpstream(upstream.ID)
+			if err != nil {
+				// Failed to get this upstream, try next one
+				continue
+			}
+
+			// Extract nodes from upstream data
+			// Response format can be either:
+			// 1. {"node": {"value": {"nodes": {...}}}} (etcd format)
+			// 2. {"value": {"nodes": {...}}} (direct format)
+			var nodes map[string]any
+
+			// Try etcd format first
+			if node, ok := upstreamData["node"].(map[string]interface{}); ok {
+				if value, ok := node["value"].(map[string]interface{}); ok {
+					if nodesMap, ok := value["nodes"].(map[string]interface{}); ok {
+						nodes = nodesMap
+					}
+				}
+			}
+
+			// Try direct format
+			if nodes == nil {
+				if value, ok := upstreamData["value"].(map[string]interface{}); ok {
+					if nodesMap, ok := value["nodes"].(map[string]interface{}); ok {
+						nodes = nodesMap
+					}
+				}
+			}
+
+			// Check if our expected backend exists in nodes
+			if nodes != nil {
+				if _, exists := nodes[expectedBackend]; exists {
+					d.log("info", fmt.Sprintf("  ✓ APISIX upstream %s has backend %s", upstream.ID, expectedBackend))
+					foundInAnyUpstream = true
+					break // Found in this upstream, no need to check others
+				}
+			}
+		}
+
+		// If we found the backend in at least one upstream, we're done
+		if foundInAnyUpstream {
+			return nil
+		}
+
+		// Not found yet, retry
+		if i < maxAttempts-1 {
+			time.Sleep(interval)
+		}
+	}
+
+	// Timed out waiting for backend to appear
+	return fmt.Errorf("backend %s not found in any app upstream after %d seconds", expectedBackend, maxAttempts*2)
 }
 
 // waitForDataPlanes waits for all data plane APISIX instances to be ready

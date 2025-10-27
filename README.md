@@ -258,12 +258,12 @@ harbor validate
 # Deploy infrastructure
 harbor deploy
 
-# Redeploy services to existing servers (all components)
-harbor redeploy
-
-# Redeploy only app servers with zero downtime (rolling deployment)
-harbor redeploy-app
-harbor redeploy-app --compose-file ./docker-compose.yml
+# Redeploy app services with zero downtime (blue-green rolling deployment)
+harbor redeploy                    # Redeploy all services
+harbor redeploy nginx              # Redeploy only nginx service
+harbor redeploy api                # Redeploy only api service
+harbor redeploy --yes              # Skip confirmation prompt
+harbor redeploy --compose-file ./docker-compose.yml  # Override compose file
 
 # Manually scale servers
 harbor scale lb 5      # Scale load balancers to 5 servers
@@ -821,11 +821,18 @@ Harbor will automatically:
 
 **Zero-downtime updates:**
 ```bash
-# Update application with rolling deployment
-harbor redeploy-app
+# Update all services with blue-green rolling deployment
+harbor redeploy
+
+# Update specific service only
+harbor redeploy nginx
+harbor redeploy api
 
 # Override compose file location
-harbor redeploy-app --compose-file ./production-compose.yml
+harbor redeploy --compose-file ./production-compose.yml
+
+# Skip confirmation (useful for CI/CD)
+harbor redeploy --yes
 ```
 
 ### SSL/TLS Configuration
