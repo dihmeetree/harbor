@@ -1218,6 +1218,40 @@ func (d *Deployer) RestartK6(ctx context.Context) error {
 	return nil
 }
 
+// RestartGrafana restarts the Grafana container on the control plane using docker-compose.
+// This is useful for applying configuration changes or recovering from issues without
+// affecting other services on the control plane.
+func (d *Deployer) RestartGrafana(ctx context.Context) error {
+	// Get control plane from Hetzner
+	controlPlanes, _, _, err := d.getServersFromHetzner(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get servers from Hetzner: %w", err)
+	}
+	if len(controlPlanes) == 0 {
+		return fmt.Errorf("no control plane server found")
+	}
+
+	controlPlane := controlPlanes[0]
+
+	// Connect to control plane via SSH
+	sshClient, err := ssh.New(controlPlane.PublicIP, d.sshUser, d.privateKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to connect to control plane: %w", err)
+	}
+	defer sshClient.Close()
+
+	// Restart Grafana using docker-compose
+	d.log("info", "Restarting Grafana container...")
+	restartCmd := "cd /var/lib/harbor && PATH=/opt/bin:$PATH docker-compose restart grafana"
+	output, err := sshClient.Execute(restartCmd)
+	if err != nil {
+		return fmt.Errorf("failed to restart Grafana: %w (output: %s)", err, output)
+	}
+
+	d.log("info", "Grafana container restarted successfully")
+	return nil
+}
+
 // StopK6 stops and removes the k6 load testing container from the control plane.
 // If the k6 container is not running, it returns without error. This is useful for
 // temporarily halting load testing without removing configuration.

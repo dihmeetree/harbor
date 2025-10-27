@@ -35,9 +35,9 @@ load balancers, and observability stacks.`,
 	rootCmd.AddCommand(validateCmd())
 	rootCmd.AddCommand(deployCmd())
 	rootCmd.AddCommand(redeployCmd())
+	rootCmd.AddCommand(restartCmd())
 	rootCmd.AddCommand(statusCmd())
 	rootCmd.AddCommand(scaleCmd())
-	rootCmd.AddCommand(k6Cmd())
 	rootCmd.AddCommand(destroyCmd())
 	rootCmd.AddCommand(versionCmd())
 }
@@ -476,33 +476,29 @@ func scaleServers(role, poolName string, targetReplicas int) error {
 	return nil
 }
 
-func k6Cmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "k6",
-		Short: "Manage k6 load testing",
-		Long:  "Manage k6 load testing container on the control plane",
-	}
-
-	cmd.AddCommand(k6RestartCmd())
-	cmd.AddCommand(k6StopCmd())
-
-	return cmd
-}
-
-func k6RestartCmd() *cobra.Command {
+func restartCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "restart",
-		Short: "Restart k6 load testing with latest configuration",
-		Long: `Restart the k6 load testing container with the latest configuration from harbor.yaml.
-This will stop the current k6 container and recreate it with updated settings including:
-- Request rate
-- Virtual users (preallocated and max)
-- Duration
-- Target path
-- Timeouts
-- Load balancer targets (all current data planes)`,
+		Use:   "restart [service]",
+		Short: "Restart a service on the control plane",
+		Long: `Restart a service container on the control plane.
+
+Available services:
+  k6       - Restart k6 load testing with latest configuration
+  grafana  - Restart Grafana monitoring dashboard
+
+Examples:
+  harbor restart k6
+  harbor restart grafana`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			service := args[0]
 			ctx := context.Background()
+
+			// Validate service name
+			validServices := map[string]bool{"k6": true, "grafana": true}
+			if !validServices[service] {
+				return fmt.Errorf("invalid service '%s'. Valid services: k6, grafana", service)
+			}
 
 			// Load config
 			cfg, err := config.Load(cfgFile)
@@ -510,8 +506,8 @@ This will stop the current k6 container and recreate it with updated settings in
 				return fmt.Errorf("failed to load config: %w", err)
 			}
 
-			// Check if k6 is enabled
-			if !cfg.K6.Enabled {
+			// Service-specific validation
+			if service == "k6" && !cfg.K6.Enabled {
 				return fmt.Errorf("k6 is not enabled in configuration (k6.enabled: false)")
 			}
 
@@ -543,74 +539,23 @@ This will stop the current k6 container and recreate it with updated settings in
 			// Initialize deployer
 			deployer := orchestrator.NewDeployer(cfg, token, privateKeyPath)
 
-			fmt.Println("[info] Restarting k6 load testing container...")
+			fmt.Printf("[info] Restarting %s...\n", service)
 			fmt.Printf("[info] Control plane: %s (%s)\n", controlPlane.Name, controlPlane.PublicNet.IPv4.IP.String())
 
-			// Restart k6
-			if err := deployer.RestartK6(ctx); err != nil {
-				return fmt.Errorf("failed to restart k6: %w", err)
+			// Restart the appropriate service
+			switch service {
+			case "k6":
+				if err := deployer.RestartK6(ctx); err != nil {
+					return fmt.Errorf("failed to restart k6: %w", err)
+				}
+				fmt.Println("[info] ✓ k6 successfully restarted with latest configuration")
+
+			case "grafana":
+				if err := deployer.RestartGrafana(ctx); err != nil {
+					return fmt.Errorf("failed to restart Grafana: %w", err)
+				}
+				fmt.Println("[info] ✓ Grafana successfully restarted")
 			}
-
-			fmt.Println("[info] ✓ k6 successfully restarted with latest configuration")
-
-			return nil
-		},
-	}
-}
-
-func k6StopCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "stop",
-		Short: "Stop k6 load testing",
-		Long: `Stop and remove the k6 load testing container.
-This will completely stop load testing without removing k6 configuration.
-Use 'harbor k6 restart' to start it again later.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := context.Background()
-
-			// Load config
-			cfg, err := config.Load(cfgFile)
-			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Get API token
-			token, err := cli.RequireEnvVar("HETZNER_API_TOKEN")
-			if err != nil {
-				return err
-			}
-
-			// Query Hetzner for control plane server
-			hetznerClient := hetzner.New(token)
-			controlPlanes, err := hetznerClient.GetServersByLabel(ctx, "role", "control")
-			if err != nil {
-				return fmt.Errorf("failed to get control plane server from Hetzner: %w", err)
-			}
-
-			if len(controlPlanes) == 0 {
-				return fmt.Errorf("no control plane server found - please run 'harbor deploy' first")
-			}
-
-			controlPlane := controlPlanes[0]
-
-			// Get SSH key path
-			privateKeyPath, err := cli.ResolveSshKeyPath(cfg)
-			if err != nil {
-				return err
-			}
-
-			// Initialize deployer
-			deployer := orchestrator.NewDeployer(cfg, token, privateKeyPath)
-
-			fmt.Println("[info] Stopping k6 load testing container...")
-			fmt.Printf("[info] Control plane: %s (%s)\n", controlPlane.Name, controlPlane.PublicNet.IPv4.IP.String())
-
-			// Stop k6
-			if err := deployer.StopK6(ctx); err != nil {
-				return fmt.Errorf("failed to stop k6: %w", err)
-			}
-
-			fmt.Println("[info] ✓ k6 load testing stopped")
 
 			return nil
 		},
