@@ -116,12 +116,13 @@ services:
       - CONFIG_PATH=/etc/harbor/config.yaml
       - PROMETHEUS_URL=http://prometheus:9090
       - APISIX_URL=http://apisix-control-plane:9180
-      - HETZNER_API_TOKEN={{.HetznerToken}}
+      - HETZNER_API_TOKEN_FILE=/run/secrets/hetzner_token
       - SSH_KEY_PATH=/root/.ssh/id_rsa
     volumes:
       - ./config.yaml:/etc/harbor/config.yaml:ro
       - /root/.ssh:/root/.ssh:ro
       - ./apisix/plugins:/var/lib/harbor/apisix/plugins:ro
+      - ./secrets/hetzner_token:/run/secrets/hetzner_token:ro
     networks:
       - apisix
     depends_on:
@@ -271,10 +272,10 @@ deployment:
       - name: 'admin'
         key: {{.APIKey}}
         role: admin
-      - name: 'viewer'
-        key: 4054f7cf07e344346cd3f287985e76a2
+{{if .ViewerKey}}      - name: 'viewer'
+        key: {{.ViewerKey}}
         role: viewer
-    admin_listen:
+{{end}}    admin_listen:
       ip: '0.0.0.0'
       port: 9180
   etcd:
@@ -426,6 +427,7 @@ type TemplateData struct {
 	NodeExporterPort    int
 	AppImage            string
 	APIKey              string
+	ViewerKey           string
 	ControlPlaneIP      string
 	DataPlaneIPs        []string
 	AppServerIPs        []string

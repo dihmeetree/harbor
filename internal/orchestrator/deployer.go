@@ -2,6 +2,9 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"strings"
@@ -14,6 +17,11 @@ import (
 	"github.com/dihmeetree/harbor/internal/hetzner"
 	"github.com/dihmeetree/harbor/internal/ssh"
 	"github.com/dihmeetree/harbor/pkg/models"
+)
+
+const (
+	// MaxConcurrentDeployments limits the number of parallel deployments to prevent resource exhaustion
+	MaxConcurrentDeployments = 10
 )
 
 // Deployer handles service deployment to servers
@@ -89,15 +97,23 @@ func (d *Deployer) DeployServicesOnly(ctx context.Context) error {
 	}
 	d.log("info", "✓ Control plane is ready")
 
-	// Deploy data planes in parallel
-	d.log("info", fmt.Sprintf("Deploying %d data planes in parallel", len(dataPlanes)))
+	// Deploy data planes and app servers in parallel with concurrency limit
+	d.log("info", fmt.Sprintf("Deploying %d data planes and %d app servers (max %d concurrent)", len(dataPlanes), len(appServers), MaxConcurrentDeployments))
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(dataPlanes)+len(appServers))
 
+	// Create semaphore to limit concurrent deployments
+	semaphore := make(chan struct{}, MaxConcurrentDeployments)
+
+	// Deploy data planes
 	for _, server := range dataPlanes {
 		wg.Add(1)
 		go func(srv *models.Server) {
 			defer wg.Done()
+			// Acquire semaphore
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
 			d.log("info", fmt.Sprintf("Deploying data plane on %s", srv.Name))
 			if err := d.DeployDataPlane(srv, controlPlane.PrivateIP); err != nil {
 				errChan <- fmt.Errorf("failed to deploy data plane on %s: %w", srv.Name, err)
@@ -107,12 +123,15 @@ func (d *Deployer) DeployServicesOnly(ctx context.Context) error {
 		}(server)
 	}
 
-	// Deploy app servers in parallel (includes monitoring)
-	d.log("info", fmt.Sprintf("Deploying %d app servers in parallel", len(appServers)))
+	// Deploy app servers (includes monitoring)
 	for _, server := range appServers {
 		wg.Add(1)
 		go func(srv *models.Server) {
 			defer wg.Done()
+			// Acquire semaphore
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
 			d.log("info", fmt.Sprintf("Deploying app on %s", srv.Name))
 			if err := d.DeployAppServer(srv); err != nil {
 				errChan <- fmt.Errorf("failed to deploy app on %s: %w", srv.Name, err)
@@ -349,15 +368,23 @@ func (d *Deployer) Deploy(ctx context.Context) error {
 	}
 	d.log("info", "✓ Control plane is ready")
 
-	// Deploy data planes in parallel
-	d.log("info", fmt.Sprintf("Deploying %d data planes in parallel", len(dataPlanes)))
+	// Deploy data planes and app servers in parallel with concurrency limit
+	d.log("info", fmt.Sprintf("Deploying %d data planes and %d app servers (max %d concurrent)", len(dataPlanes), len(appServers), MaxConcurrentDeployments))
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(dataPlanes)+len(appServers))
 
+	// Create semaphore to limit concurrent deployments
+	semaphore := make(chan struct{}, MaxConcurrentDeployments)
+
+	// Deploy data planes
 	for _, server := range dataPlanes {
 		wg.Add(1)
 		go func(srv *models.Server) {
 			defer wg.Done()
+			// Acquire semaphore
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
 			d.log("info", fmt.Sprintf("Deploying data plane on %s", srv.Name))
 			if err := d.DeployDataPlane(srv, controlPlane.PrivateIP); err != nil {
 				errChan <- fmt.Errorf("failed to deploy data plane on %s: %w", srv.Name, err)
@@ -367,12 +394,15 @@ func (d *Deployer) Deploy(ctx context.Context) error {
 		}(server)
 	}
 
-	// Deploy app servers in parallel (includes monitoring)
-	d.log("info", fmt.Sprintf("Deploying %d app servers in parallel", len(appServers)))
+	// Deploy app servers (includes monitoring)
 	for _, server := range appServers {
 		wg.Add(1)
 		go func(srv *models.Server) {
 			defer wg.Done()
+			// Acquire semaphore
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
 			d.log("info", fmt.Sprintf("Deploying app on %s", srv.Name))
 			if err := d.DeployAppServer(srv); err != nil {
 				errChan <- fmt.Errorf("failed to deploy app on %s: %w", srv.Name, err)
@@ -857,29 +887,41 @@ func (d *Deployer) ConfigureAPISIX(controlPlane *models.Server, appServers []*mo
 	if d.config.APISIX.SSL.CertPath != "" {
 		d.log("info", "Configuring SSL certificates")
 
-		cert, err := os.ReadFile(d.config.APISIX.SSL.CertPath)
+		certPEM, err := os.ReadFile(d.config.APISIX.SSL.CertPath)
 		if err != nil {
-			d.log("warn", fmt.Sprintf("Failed to read SSL cert: %v", err))
-		} else {
-			key, err := os.ReadFile(d.config.APISIX.SSL.KeyPath)
-			if err != nil {
-				d.log("warn", fmt.Sprintf("Failed to read SSL key: %v", err))
-			} else {
-				var clientCA string
-				if d.config.APISIX.SSL.ClientCAPath != "" {
-					caBytes, err := os.ReadFile(d.config.APISIX.SSL.ClientCAPath)
-					if err != nil {
-						d.log("warn", fmt.Sprintf("Failed to read client CA: %v", err))
-					} else {
-						clientCA = string(caBytes)
-					}
-				}
-
-				if err := client.CreateSSL(d.config.APISIX.SSL, string(cert), string(key), clientCA); err != nil {
-					d.log("warn", fmt.Sprintf("Failed to configure SSL: %v", err))
-				}
-			}
+			return fmt.Errorf("failed to read SSL cert: %w", err)
 		}
+
+		keyPEM, err := os.ReadFile(d.config.APISIX.SSL.KeyPath)
+		if err != nil {
+			return fmt.Errorf("failed to read SSL key: %w", err)
+		}
+
+		// Validate certificate and key
+		if err := validateSSLCertAndKey(certPEM, keyPEM); err != nil {
+			return fmt.Errorf("SSL certificate validation failed: %w", err)
+		}
+
+		var clientCA string
+		if d.config.APISIX.SSL.ClientCAPath != "" {
+			caBytes, err := os.ReadFile(d.config.APISIX.SSL.ClientCAPath)
+			if err != nil {
+				return fmt.Errorf("failed to read client CA: %w", err)
+			}
+
+			// Validate CA certificate
+			if err := validateCACert(caBytes); err != nil {
+				return fmt.Errorf("client CA validation failed: %w", err)
+			}
+
+			clientCA = string(caBytes)
+		}
+
+		if err := client.CreateSSL(d.config.APISIX.SSL, string(certPEM), string(keyPEM), clientCA); err != nil {
+			return fmt.Errorf("failed to configure SSL: %w", err)
+		}
+
+		d.log("info", "✓ SSL certificates validated and configured")
 	}
 
 	d.log("info", "APISIX configuration completed")
@@ -926,42 +968,6 @@ func (d *Deployer) UpdateAPISIXUpstreams(controlPlane *models.Server, appServers
 	}
 
 	d.log("info", "✓ Upstreams updated")
-	return nil
-}
-
-// updateAPISIXUpstreamsWithServers updates APISIX upstreams with a specific list of app servers
-// This is useful for removing/adding servers during rolling deployments
-func (d *Deployer) updateAPISIXUpstreamsWithServers(controlPlane *models.Server, appServers []*models.Server) error {
-	// Connect to control plane via SSH
-	sshClient, err := ssh.New(controlPlane.PublicIP, d.sshUser, d.privateKeyPath)
-	if err != nil {
-		return fmt.Errorf("failed to connect to control plane: %w", err)
-	}
-	defer sshClient.Close()
-
-	// Create APISIX client that executes via SSH
-	adminURL := "http://127.0.0.1:9180"
-	apiKey := d.config.APISIX.APIKey
-	client := apisix.NewWithSSH(adminURL, apiKey, sshClient)
-
-	// Update upstreams with the provided app servers
-	for _, upstream := range d.config.APISIX.Upstreams {
-		// Skip non-app upstreams
-		if upstream.ID == "grafana" {
-			continue
-		}
-
-		// Build nodes map with provided app servers
-		nodes := make(map[string]int)
-		for _, server := range appServers {
-			nodes[fmt.Sprintf("%s:80", server.PrivateIP)] = 1
-		}
-
-		if err := client.CreateUpstream(upstream, nodes); err != nil {
-			return fmt.Errorf("failed to update upstream %s: %w", upstream.Name, err)
-		}
-	}
-
 	return nil
 }
 
@@ -1362,14 +1368,22 @@ func (d *Deployer) discoverCurrentAppPort(server *models.Server) (int, error) {
 	}
 
 	port := strings.TrimSpace(output)
-	switch port {
-	case "80":
-		return 80, nil
-	case "8080":
-		return 8080, nil
+
+	// Validate port is numeric and in valid range
+	var portNum int
+	if _, err := fmt.Sscanf(port, "%d", &portNum); err != nil {
+		return 0, fmt.Errorf("invalid port format: %s", port)
 	}
 
-	return 0, fmt.Errorf("unexpected port discovered: %s", port)
+	// Only accept ports 80 or 8080 (our expected ports)
+	switch portNum {
+	case 80:
+		return 80, nil
+	case 8080:
+		return 8080, nil
+	default:
+		return 0, fmt.Errorf("unexpected port discovered: %d (expected 80 or 8080)", portNum)
+	}
 }
 
 // DeployAppServerOnPort deploys the user's application container to an app server on a specific port.
@@ -1391,28 +1405,33 @@ func (d *Deployer) DeployAppServerOnPort(server *models.Server, port int, servic
 		return fmt.Errorf("app.compose_file is required in config")
 	}
 
+	// Validate port is safe (80 or 8080 only)
+	if port != 80 && port != 8080 {
+		return fmt.Errorf("invalid port %d: only ports 80 and 8080 are supported", port)
+	}
+
 	// Copy docker-compose.yml and all volume files
 	if err := CopyComposeFilesAndVolumes(sshClient, d.config.App.ComposeFile, "/var/lib/harbor", server.Name); err != nil {
 		return fmt.Errorf("failed to copy compose files and volumes: %w", err)
 	}
 
-	// Modify the docker-compose.yml to use the specified port
+	// Modify the docker-compose.yml to use the specified port (in Go to avoid sed injection risks)
 	d.log("info", fmt.Sprintf("  Modifying compose file to use port %d", port))
-	modifyCmd := fmt.Sprintf(`sed -i 's/"80:80"/"%d:80"/g' /var/lib/harbor/docker-compose.yml`, port)
-	if _, err := sshClient.Execute(modifyCmd); err != nil {
-		return fmt.Errorf("failed to modify compose file for port %d: %w", port, err)
+
+	// Read the compose file
+	content, err := sshClient.Execute("cat /var/lib/harbor/docker-compose.yml")
+	if err != nil {
+		return fmt.Errorf("failed to read compose file: %w", err)
 	}
 
-	// Also handle single quotes format
-	modifyCmd2 := fmt.Sprintf(`sed -i "s/'80:80'/'%d:80'/g" /var/lib/harbor/docker-compose.yml`, port)
-	if _, err := sshClient.Execute(modifyCmd2); err != nil {
-		return fmt.Errorf("failed to modify compose file for port %d: %w", port, err)
-	}
+	// Replace all port mappings (safe string replacement - no shell injection)
+	modifiedContent := strings.ReplaceAll(content, `"80:80"`, fmt.Sprintf(`"%d:80"`, port))
+	modifiedContent = strings.ReplaceAll(modifiedContent, `'80:80'`, fmt.Sprintf(`'%d:80'`, port))
+	modifiedContent = strings.ReplaceAll(modifiedContent, `- 80:80`, fmt.Sprintf(`- %d:80`, port))
 
-	// Also handle no-quotes format
-	modifyCmd3 := fmt.Sprintf(`sed -i 's/- 80:80/- %d:80/g' /var/lib/harbor/docker-compose.yml`, port)
-	if _, err := sshClient.Execute(modifyCmd3); err != nil {
-		return fmt.Errorf("failed to modify compose file for port %d: %w", port, err)
+	// Write the modified content back
+	if err := sshClient.WriteFile("/var/lib/harbor/docker-compose.yml", modifiedContent); err != nil {
+		return fmt.Errorf("failed to write modified compose file: %w", err)
 	}
 
 	// Start user services (optionally filtered by service name)
@@ -1692,4 +1711,66 @@ func (d *Deployer) getServersFromHetzner(ctx context.Context) (controlPlanes, da
 	appServers = HcloudListToModels(appHetzner)
 
 	return controlPlanes, dataPlanes, appServers, nil
+}
+
+// validateSSLCertAndKey validates that the certificate and private key are valid and match each other.
+// It also checks that the certificate is not expired.
+func validateSSLCertAndKey(certPEM, keyPEM []byte) error {
+	// Parse certificate
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return fmt.Errorf("failed to decode PEM certificate")
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("failed to parse certificate: %w", err)
+	}
+
+	// Check if certificate is expired
+	now := time.Now()
+	if now.Before(cert.NotBefore) {
+		return fmt.Errorf("certificate is not yet valid (valid from %s)", cert.NotBefore)
+	}
+	if now.After(cert.NotAfter) {
+		return fmt.Errorf("certificate has expired (expired on %s)", cert.NotAfter)
+	}
+
+	// Verify certificate and key match
+	_, err = tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return fmt.Errorf("certificate and private key do not match: %w", err)
+	}
+
+	return nil
+}
+
+// validateCACert validates that the CA certificate is valid and not expired.
+func validateCACert(caPEM []byte) error {
+	// Parse CA certificate
+	block, _ := pem.Decode(caPEM)
+	if block == nil {
+		return fmt.Errorf("failed to decode PEM CA certificate")
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("failed to parse CA certificate: %w", err)
+	}
+
+	// Check if certificate is expired
+	now := time.Now()
+	if now.Before(cert.NotBefore) {
+		return fmt.Errorf("CA certificate is not yet valid (valid from %s)", cert.NotBefore)
+	}
+	if now.After(cert.NotAfter) {
+		return fmt.Errorf("CA certificate has expired (expired on %s)", cert.NotAfter)
+	}
+
+	// Verify it's a CA certificate
+	if !cert.IsCA {
+		return fmt.Errorf("certificate is not a CA certificate")
+	}
+
+	return nil
 }

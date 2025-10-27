@@ -31,6 +31,7 @@ type Autoscaler struct {
 	lastScaleTime map[string]time.Time
 	scaleLock     sync.Mutex
 	stopChan      chan struct{}
+	httpClient    *http.Client
 }
 
 // MetricResult represents a Prometheus query result
@@ -63,6 +64,9 @@ func NewAutoscaler(cfg *config.Config, prometheusURL string, hetznerToken string
 		deployer:      deployer,
 		lastScaleTime: make(map[string]time.Time),
 		stopChan:      make(chan struct{}),
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+		},
 	}, nil
 }
 
@@ -100,9 +104,6 @@ func (a *Autoscaler) Stop() {
 
 // checkAndScale checks metrics and scales if needed
 func (a *Autoscaler) checkAndScale(ctx context.Context) error {
-	a.scaleLock.Lock()
-	defer a.scaleLock.Unlock()
-
 	a.log("info", "Running autoscaler check cycle...")
 
 	// Check load balancer pool
@@ -122,6 +123,10 @@ func (a *Autoscaler) checkAndScale(ctx context.Context) error {
 
 // checkPool checks a specific server pool and scales if needed
 func (a *Autoscaler) checkPool(ctx context.Context, roleLabel string, poolName string) error {
+	// Acquire lock for entire scaling operation to prevent race conditions
+	a.scaleLock.Lock()
+	defer a.scaleLock.Unlock()
+
 	// Check cooldown period
 	if lastScale, exists := a.lastScaleTime[poolName]; exists {
 		cooldownRemaining := time.Duration(a.config.Autoscaler.Cooldown)*time.Second - time.Since(lastScale)
@@ -232,7 +237,7 @@ func (a *Autoscaler) getAverageMemory(ips []string) (float64, error) {
 func (a *Autoscaler) queryPrometheus(query string) (float64, error) {
 	reqURL := fmt.Sprintf("%s/api/v1/query?query=%s", a.prometheusURL, url.QueryEscape(query))
 
-	resp, err := http.Get(reqURL)
+	resp, err := a.httpClient.Get(reqURL)
 	if err != nil {
 		return 0, fmt.Errorf("failed to query Prometheus: %w", err)
 	}
