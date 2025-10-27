@@ -195,9 +195,9 @@ harbor redeploy --yes          # Skip confirmation
 harbor scale lb 5              # Scale load balancers to 5
 harbor scale app 10            # Scale app servers to 10
 
-# k6 load testing
-harbor k6 restart              # Restart k6 with latest config
-harbor k6 stop                 # Stop load testing
+# Restart services with latest configuration
+harbor restart k6              # Restart k6 (syncs script, applies config)
+harbor restart grafana         # Restart Grafana (syncs dashboards, config)
 
 # Show infrastructure status
 harbor status

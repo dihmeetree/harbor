@@ -531,39 +531,77 @@ When you update k6 settings in `harbor.yaml` (rate, VUs, duration, target path, 
 # Edit k6 configuration in harbor.yaml
 vim harbor.yaml
 
+# Or edit the k6 test script
+vim k6/loadtest.js
+
 # Restart k6 with new settings
-harbor k6 restart
+harbor restart k6
 ```
 
 The restart command:
 
+- Copies `k6/loadtest.js` script to control plane (if it exists locally)
 - Stops the current k6 container
 - Queries Hetzner API for current data plane IPs (always uses fresh data)
 - Recreates k6 with updated configuration from harbor.yaml
+- Applies CPU and memory limits from configuration
 - Starts load testing immediately
 
 Example:
 
 ```bash
-$ harbor k6 restart
-[info] Restarting k6 load testing container...
+$ harbor restart k6
+[info] Restarting k6...
 [info] Control plane: harbor-control (X.X.X.X)
+[info] Copying k6 load test script to control plane...
+[info] ✓ k6 script copied to control plane
 [info] Targeting 3 data plane(s): http://10.0.1.3,http://10.0.1.4,http://10.0.1.5
 [info] Stopping existing k6 container...
 [info] Starting k6 with updated configuration...
 [info]   Rate: 100 req/s | VUs: 20-500 | Duration: 1h | Path: /api/health
+[info]   CPU Limit: 2.0 cores
+[info]   Memory Limit: 2g
 [info] ✓ k6 successfully restarted with latest configuration
 ```
 
-### Stopping k6
+### Restarting Grafana
 
-To temporarily stop k6 load testing:
+To apply Grafana configuration changes (dashboards, provisioning, grafana.ini):
 
 ```bash
-harbor k6 stop
+# Edit Grafana configuration
+vim grafana/config/grafana.ini
+
+# Or update dashboards
+vim grafana/dashboards/my-dashboard.json
+
+# Restart Grafana with new configuration
+harbor restart grafana
 ```
 
-This stops and removes the k6 container while preserving your configuration. Restart anytime with `harbor k6 restart`.
+The restart command:
+
+- Copies `grafana/provisioning` directory to control plane (datasources, dashboard configs)
+- Copies `grafana/dashboards` directory to control plane (dashboard JSON files)
+- Copies `grafana/config/grafana.ini` to control plane (main configuration)
+- Restarts Grafana container to load new configuration
+
+Example:
+
+```bash
+$ harbor restart grafana
+[info] Restarting grafana...
+[info] Control plane: harbor-control (X.X.X.X)
+[info] Copying Grafana provisioning directory...
+[info] ✓ Grafana provisioning directory copied
+[info] Copying Grafana dashboards directory...
+[info] ✓ Grafana dashboards directory copied
+[info] Copying Grafana configuration file...
+[info] ✓ Grafana configuration file copied
+[info] Restarting Grafana container...
+[info] Grafana container restarted successfully
+[info] ✓ Grafana successfully restarted
+```
 
 ## Cost Estimate (Hetzner)
 

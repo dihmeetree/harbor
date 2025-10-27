@@ -269,11 +269,9 @@ harbor redeploy --compose-file ./docker-compose.yml  # Override compose file
 harbor scale lb 5      # Scale load balancers to 5 servers
 harbor scale app 10    # Scale app servers to 10 servers
 
-# Restart k6 load testing with latest config
-harbor k6 restart
-
-# Stop k6 load testing
-harbor k6 stop
+# Restart services with latest configuration
+harbor restart k6       # Restart k6 load testing (syncs k6/loadtest.js, applies harbor.yaml config)
+harbor restart grafana  # Restart Grafana (syncs dashboards, provisioning, grafana.ini)
 
 # Show infrastructure status
 harbor status
@@ -713,58 +711,42 @@ harbor redeploy
 
 #### Manual Configuration Update
 
-When you change k6 settings in `harbor.yaml` (rate, VUs, duration, path, etc.), restart k6 to apply the new configuration:
+When you change k6 settings in `harbor.yaml` (rate, VUs, duration, path, CPU/memory limits, etc.) or modify the k6 test script (`k6/loadtest.js`), restart k6 to apply the new configuration:
 
 ```bash
 # Edit harbor.yaml to change k6 settings
 vim harbor.yaml
 
+# Or edit the k6 test script
+vim k6/loadtest.js
+
 # Restart k6 with new configuration
-harbor k6 restart
+harbor restart k6
 ```
 
 The restart command will:
 
+- Copy `k6/loadtest.js` script to control plane (if it exists)
 - Stop the current k6 container
 - Query Hetzner API for current data plane IPs (ensures accurate targets)
 - Recreate k6 container with updated settings from harbor.yaml
+- Apply CPU and memory limits from configuration
 - Start load testing with new configuration
 
 Example output:
 
 ```
-[info] Restarting k6 load testing container...
+[info] Restarting k6...
 [info] Control plane: harbor-control (X.X.X.X)
+[info] Copying k6 load test script to control plane...
+[info] ✓ k6 script copied to control plane
 [info] Targeting 3 data plane(s): http://10.0.1.3,http://10.0.1.4,http://10.0.1.5
 [info] Stopping existing k6 container...
 [info] Starting k6 with updated configuration...
 [info]   Rate: 100 req/s | VUs: 20-500 | Duration: 1h | Path: /api/health
+[info]   CPU Limit: 2.0 cores
+[info]   Memory Limit: 2g
 [info] ✓ k6 successfully restarted with latest configuration
-```
-
-### Stopping k6
-
-To temporarily stop k6 load testing without changing configuration:
-
-```bash
-harbor k6 stop
-```
-
-This will:
-
-- Stop and remove the k6 container
-- Keep k6 configuration in harbor.yaml
-- Allow you to restart later with `harbor k6 restart`
-
-Example output:
-
-```
-[info] Stopping k6 load testing container...
-[info] Control plane: harbor-control (X.X.X.X)
-[info] ✓ k6 load testing stopped
-
-To restart k6 with current configuration:
-  harbor k6 restart
 ```
 
 ### Disabling k6
@@ -780,6 +762,88 @@ Then redeploy:
 
 ```bash
 harbor redeploy
+```
+
+## Grafana Monitoring
+
+Harbor deploys Grafana on the control plane with pre-configured dashboards for monitoring your infrastructure. Grafana automatically connects to Prometheus for metrics collection.
+
+### Accessing Grafana
+
+After deployment, access Grafana at:
+
+```
+http://<control-plane-ip>:3000
+```
+
+Default credentials:
+- Username: `admin`
+- Password: `admin` (you'll be prompted to change this on first login)
+
+### Pre-configured Dashboards
+
+Harbor includes dashboards for:
+
+- **cAdvisor Metrics**: Container CPU, memory, network, and disk usage
+- **Node Metrics**: System-level CPU, memory, disk, and network metrics
+- **APISIX Metrics**: Request rates, latencies, status codes, upstream health
+
+### Updating Grafana Configuration
+
+When you modify Grafana configuration files or dashboards locally, restart Grafana to apply the changes:
+
+```bash
+# Edit Grafana configuration
+vim grafana/config/grafana.ini
+
+# Or update dashboards
+vim grafana/dashboards/my-dashboard.json
+
+# Or modify datasource provisioning
+vim grafana/provisioning/datasources/prometheus.yml
+
+# Restart Grafana with new configuration
+harbor restart grafana
+```
+
+The restart command will:
+
+- Copy `grafana/provisioning` directory to control plane (datasources, dashboard configs)
+- Copy `grafana/dashboards` directory to control plane (dashboard JSON files)
+- Copy `grafana/config/grafana.ini` to control plane (main configuration)
+- Restart Grafana container to load new configuration
+
+Example output:
+
+```
+[info] Restarting grafana...
+[info] Control plane: harbor-control (X.X.X.X)
+[info] Copying Grafana provisioning directory...
+[info] ✓ Grafana provisioning directory copied
+[info] Copying Grafana dashboards directory...
+[info] ✓ Grafana dashboards directory copied
+[info] Copying Grafana configuration file...
+[info] ✓ Grafana configuration file copied
+[info] Restarting Grafana container...
+[info] Grafana container restarted successfully
+[info] ✓ Grafana successfully restarted
+```
+
+### Grafana File Structure
+
+```
+grafana/
+├── config/
+│   └── grafana.ini              # Main Grafana configuration
+├── dashboards/
+│   ├── cadvisor.json           # Container metrics dashboard
+│   ├── node-exporter.json      # System metrics dashboard
+│   └── custom-dashboard.json   # Your custom dashboards
+└── provisioning/
+    ├── dashboards/
+    │   └── default.yml         # Dashboard provisioning config
+    └── datasources/
+        └── prometheus.yml       # Prometheus datasource config
 ```
 
 ## Advanced Usage
