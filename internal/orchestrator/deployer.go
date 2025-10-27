@@ -1165,9 +1165,27 @@ func (d *Deployer) RestartK6(ctx context.Context) error {
 	fmt.Printf("[info]   Rate: %d req/s | VUs: %d-%d | Duration: %s | Path: %s\n",
 		k6Config.Rate, k6Config.PreallocatedVUs, k6Config.MaxVUs, k6Config.Duration, k6Config.TargetPath)
 
+	// Build docker run command with resource limits if configured
 	runCmd := fmt.Sprintf(`docker run -d --name k6 \
 		--network %s \
-		--restart always \
+		--restart always`, networkName)
+
+	// Add CPU limit if configured
+	if k6Config.CPULimit != "" {
+		runCmd += fmt.Sprintf(` \
+		--cpus "%s"`, k6Config.CPULimit)
+		fmt.Printf("[info]   CPU Limit: %s cores\n", k6Config.CPULimit)
+	}
+
+	// Add memory limit if configured
+	if k6Config.MemoryLimit != "" {
+		runCmd += fmt.Sprintf(` \
+		--memory "%s"`, k6Config.MemoryLimit)
+		fmt.Printf("[info]   Memory Limit: %s\n", k6Config.MemoryLimit)
+	}
+
+	// Add remaining flags and environment variables
+	runCmd += fmt.Sprintf(` \
 		-e "K6_PROMETHEUS_RW_SERVER_URL=http://prometheus:9090/api/v1/write" \
 		-e "K6_PROMETHEUS_RW_TREND_STATS=p(95),p(99),min,max,avg" \
 		-e "K6_PROMETHEUS_RW_PUSH_INTERVAL=5s" \
@@ -1182,7 +1200,6 @@ func (d *Deployer) RestartK6(ctx context.Context) error {
 		-e "GRACEFUL_STOP=%s" \
 		-v /var/lib/harbor/k6:/scripts:ro \
 		grafana/k6:latest run -o experimental-prometheus-rw /scripts/loadtest.js`,
-		networkName,
 		lbTargets,
 		k6Config.Rate,
 		k6Config.Duration,
