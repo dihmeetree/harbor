@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://i.imgur.com/ZpzW1ma.png" alt="Harbor" width="850">
+  <img src="https://i.ibb.co/L23qPm0/IMG-0689.jpg" alt="Harbor" width="850">
 </p>
 
 Harbor is a CLI tool for provisioning and managing APISIX-based infrastructure on Hetzner Cloud using Flatcar Container Linux. It automates the deployment of a complete API gateway, load balancing, and observability stack with a single command.
